@@ -2,6 +2,31 @@
 
 Three models score game situations: a run expectancy table (re24_v1), a win probability model (wp v1), and a plate-appearance model (pa v1). All are built from Retrosheet regular-season play-by-play data (see `docs/retrosheet_notice.md`). The first two are league-average models: they describe a typical team, not the teams on the field. The plate-appearance model adds the batter and pitcher.
 
+## Valuation principle
+
+Every option in a decision is valued through the same path. A fan is scored on the difference between options, so a model gap that affects every option equally cancels in the comparison.
+
+Decision values are anchored. The level comes from the empirical tables, and the plate-appearance model adds only the player and count effects:
+
+- `value_wp(state, batter, pitcher)` = `wp(state)` + `continue_pa_wp(state, batter, pitcher)` - `continue_pa_wp(state at 0-0, league-average batter and pitcher with the same handedness)`.
+- `value_runs` is the same with `run_expectancy` and `continue_pa_runs`.
+- Both engine terms use the same platoon and base-out state settings. With league-average players at 0-0 the two engine terms are identical, so the value equals the table exactly.
+- Decision modules use `value_wp` and `value_runs` (`engine/src/skipboard/valuation.py`). `continue_pa_wp` and `continue_pa_runs` stay available as the raw model.
+
+Why anchor: the raw plate-appearance model differs from the tables by up to 0.051 runs in a single state (see "Consistency checks and tolerances"). Those gaps are not equal across the states a decision compares, so they do not fully cancel. The raw model's steal break-even rate differed from the tables' by up to 3 percentage points, which is enough to flip a verdict on an attempt near break-even. Anchored, league-average players reproduce the tables' break-even exactly.
+
+Example: the steal. Each option is valued with `value_wp` (or `value_runs`) at the state it leads to, with the same batter, pitcher and count:
+
+| Option | State valued |
+|---|---|
+| Hold | Current state, runner stays |
+| Steal succeeds | Runner on the next base, same count and outs |
+| Steal fails | Runner out and base cleared, one more out (if that is the third out, the half-inning ends and the value is the next half-inning's) |
+
+The value of attempting is the success probability times the success value plus the failure probability times the failure value. That is compared with the value of holding.
+
+Player information moves the answer. For five real 2025 matchups with a runner on first, 0 outs and a 0-0 count, the anchored break-even ranged from 3.5 percentage points below the league table (weak hitters) to 6.9 points above it (a strong power hitter), in runs and in win probability for the bottom of the 7th tied (`research/steal_break_even_examples.py`). Against a strong hitter, an out on the bases costs more, so an attempt needs a higher success rate.
+
 ## Run expectancy (re24_v1)
 
 ### Purpose
@@ -170,7 +195,8 @@ Outcome categories:
 - Intentional walks and plate appearances ending in a bunt stay in that file with an `excluded` flag. They are left out of all tables and fits.
 - League tables use 2023 to 2025: 544,378 plate appearances. Runner advancement uses innings 1 to 8 only (491,316).
 - Player rates use the current season and the three before it.
-- Scripts: `research/build_pa_tables.py` (league tables) and `research/pa_matchup_model.py` (matchup model and validation). Files in `models/pa_model/`: `count_outcomes_v1.csv`, `platoon_rates_v1.csv`, `advancement_v1.csv`, `single_split_v1.csv`, `shrinkage_v1.csv`.
+- Scripts: `research/build_pa_tables.py` (league tables) and `research/pa_matchup_model.py` (matchup model and validation). Files in `models/pa_model/`: `count_outcomes_v1.csv`, `platoon_rates_v1.csv`, `advancement_v1.csv`, `single_split_v1.csv`, `fc_share_v1.csv`, `state_ratio_v1.csv`, `shrinkage_v1.csv`.
+- Engine: `engine/src/skipboard/plate_appearance.py`, `transitions.py` and `continue_pa.py` reproduce the research model to within 1e-15 (`research/check_engine_parity.py`).
 
 ### Method: league tables
 
@@ -190,12 +216,21 @@ The rules:
 | BB, HBP, OTHER | Batter to first; only forced runners advance one base |
 | 3B | No rule; uses data and pooling only |
 
+- **FC share.** The share of fielder's choices among ground balls (GB_OUT plus FC) by base-out state. It is 0 with bases empty and highest for plays at the plate: 0.28 with a runner on third and 1 out, 0.34 with runners on second and third and 1 out.
+- **Base-out state ratio.** For each base-out state, each outcome's share divided by its overall share. With first base open, walks rise by a factor of 1.15 to 1.43; with a runner on third and fewer than 2 outs, singles rise by a factor of 1.03 to 1.27 (shrunk values).
+- **State ratio shrinkage.** Each state's share is pulled toward the overall share: (n x share + m x overall share) / (n + m). The prior strength m is estimated per outcome by method of moments across the 24 states: the variance of the state shares minus the average sampling variance. An outcome with no variance beyond sampling noise would get a ratio of 1 everywhere; none did. Triples are shrunk most (raw range 0.60 to 1.50, shrunk 0.86 to 1.09), walks and strikeouts least.
+
+| Outcome | K | BB | HBP | 1B | 2B | 3B | HR | GB | AIR_OUT |
+|---|---|---|---|---|---|---|---|---|---|
+| Prior strength m | 653 | 230 | 2,481 | 500 | 3,703 | 41,816 | 4,916 | 3,207 | 2,775 |
+
 ### Method: matchup model
 
 - **Weighting.** Each player's outcome counts are weighted 6 for the current season up to the day before the game, then 5, 4 and 3 for the three previous seasons. Same-day games are excluded.
 - **Shrinkage.** Each rate is pulled toward the league rate: (weighted count + k x league rate) / (weighted PA + k), then renormalized. k is estimated for each category and role with a beta-binomial fit across players on 2022 to 2024 counts. It is fitted per actual plate appearance, then multiplied by the average weight per PA (4.0) so it matches the weighted counts.
 - **Combination.** Batter and pitcher are combined with the odds-ratio method: each outcome's probability is proportional to batter rate x pitcher rate / league rate.
 - **Platoon.** The result is multiplied by the league platoon ratio for the matchup's handedness, then renormalized.
+- **Base-out state.** The result is multiplied by the shrunk state ratio for the state's bases and outs, then renormalized. It can be turned off with a flag (`use_state` in research, `apply_state` in the engine).
 - **Count conditioning.** For a plate appearance already at count c, the league outcome distribution for c is multiplied by the matchup's ratio to league for each outcome, then renormalized.
 
 The model covers nine outcomes: GB_OUT and FC are combined as GB, and ROE and OTHER stay at league rates. GB is split back into GB_OUT and FC using the league FC share for the base-out state.
@@ -237,20 +272,52 @@ The test set is 181,084 plate appearances. Log loss is per plate appearance, ove
 | Batter only | 1.8289 | 1.01% |
 | Batter and pitcher | 1.8184 | 1.58% |
 | Batter, pitcher and platoon | 1.8179 | 1.61% |
+| Batter, pitcher, platoon and base-out state (full model) | 1.8166 | 1.68% |
+
+The state adjustment adds 0.0013. Unshrunk state ratios scored 1.81666; shrunk, 1.81659.
 
 - **HR calibration:** within 0.003 in every decile of predicted probability.
-- **K calibration:** close overall (0.227 predicted, 0.224 actual), but the top three deciles are overpredicted by 0.005 to 0.009.
+- **K calibration:** close overall (0.227 predicted, 0.224 actual), but the top three deciles are overpredicted by 0.006 to 0.011. Without the state adjustment the overprediction was 0.005 to 0.009, so the adjustment makes it slightly worse.
 
-| Count conditioning | Plate appearances | League count table | Count-conditioned model | Improvement |
+| Count conditioning | Plate appearances | League count table | Count-conditioned full model | Improvement | Without state adjustment |
+|---|---|---|---|---|---|
+| Through 0-2 | 38,924 | 1.5750 | 1.5483 | 1.70% | 1.5486 |
+| Through 3-0 | 7,132 | 1.3206 | 1.3123 | 0.63% | 1.3119 |
+| Through 3-2 | 25,752 | 1.6945 | 1.6780 | 0.98% | 1.6776 |
+
+### Consistency checks and tolerances
+
+With league-average players at 0-0, the engine's one-step value of letting the plate appearance play out (`continue_pa`) should match the run expectancy and win probability tables. It does not match exactly, and the gap has four sources. For runs, across the 24 base-out states:
+
+| Source of the gap | Largest | Mean | What it is |
+|---|---|---|---|
+| Memorylessness | 0.031 runs | 0.009 | Half-innings that reach a state score more afterward than the average from the next state (for example, a weaker pitcher is still in) |
+| Steals, wild pitches, balks | 0.018 | 0.007 | Runs and advances outside plate appearances, which `continue_pa` does not model |
+| Excluded bunts and intentional walks | 0.010 | 0.002 | Left out of the outcome and advancement tables |
+| Left in the engine | 0.026 | 0.006 | Outcome mix and advancement smoothing, including state ratio shrinkage |
+| **Total** | **0.051** | **0.015** | Largest at runners on first and third, 0 outs |
+
+The largest win probability gap is 0.012 (runners on first and third, 0 outs, top of the 9th, tied).
+
+Steal of second, break-even success rate at 0-0 with a runner on first only, from the tables and from the engine:
+
+| Context | Outs | Tables | Engine | Difference |
 |---|---|---|---|---|
-| Through 0-2 | 38,924 | 1.5750 | 1.5486 | 1.68% |
-| Through 3-0 | 7,132 | 1.3206 | 1.3119 | 0.66% |
-| Through 3-2 | 25,752 | 1.6945 | 1.6776 | 1.00% |
+| Runs | 0 / 1 / 2 | 0.712 / 0.729 / 0.710 | 0.727 / 0.759 / 0.708 | +1.5 / +3.0 / -0.2 points |
+| Top 9th, tied | 0 / 1 / 2 | 0.600 / 0.625 / 0.623 | 0.608 / 0.651 / 0.602 | +0.8 / +2.5 / -2.2 points |
+| Bottom 9th, tied | 0 / 1 / 2 | 0.572 / 0.602 / 0.587 | 0.573 / 0.611 / 0.571 | +0.1 / +0.9 / -1.6 points |
+| Bottom 7th, tied | 0 / 1 / 2 | 0.642 / 0.670 / 0.644 | 0.650 / 0.685 / 0.640 | +0.8 / +1.5 / -0.5 points |
+
+The raw model's break-even rates differ from the tables' by up to 3.0 percentage points. This is why decision values are anchored (see "Valuation principle").
+
+These checks are diagnostics of the raw plate-appearance model (`continue_pa`), not of decision values. Decision values are anchored to the tables (see "Valuation principle") and match them exactly for league-average players at 0-0, which a separate test checks.
+
+The diagnostic test tolerances are the largest observed gap plus a margin, set after the state ratio shrinkage: runs 0.051 + 0.005 = 0.056; win probability 0.012 + 0.002 = 0.0143; break-even rates 3.03 + 0.5 = 3.54 percentage points. A change to the model that widens any gap fails the tests.
 
 ### Known limits
 
 - **The matchup effect is assumed the same at every count.** A high-strikeout pitcher gets the same relative boost at 3-0 as at 0-2.
-- **Strikeouts are slightly overpredicted in the top bins in 2025.** Part of this is a lower strikeout environment in 2025 than in the 2023 to 2024 tables.
+- **Strikeouts are slightly overpredicted in the top bins in 2025** (by up to 0.011). Part of this is a lower strikeout environment in 2025 than in the 2023 to 2024 tables; the state adjustment adds about 0.002.
 - **No park factors.**
 - **No individual platoon splits.** Every player gets the league platoon ratio for their handedness.
 - **Switch hitters are assumed to bat opposite the pitcher.**
@@ -259,3 +326,5 @@ The test set is 181,084 plate appearances. Log loss is per plate appearance, ove
 - **Players with no history get league rates.** In 2025 this applied to 365 plate appearances on the batter side and 1,859 on the pitcher side.
 - **`nump` is not used.** Retrosheet's pitch-count column follows different conventions in different seasons when a play happens mid-PA, so pitch counts come from the pitch sequence instead.
 - **Some advancement cells are pooled across outs,** mostly triples, errors and fielder's choices with runners on third.
+- **Base-out state ratios are league-wide.** They are the same for every matchup and every count.
+- **`continue_pa` does not model steals, wild pitches or balks,** and treats half-innings as memoryless. Its values differ from the run expectancy table by up to 0.051 runs in a single state.

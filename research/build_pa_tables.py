@@ -1,8 +1,12 @@
+import sys
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from pa_matchup_model import state_ratio_table  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAYS = ROOT / "data" / "derived" / "plays_regular_2016_2025.parquet"
@@ -339,9 +343,52 @@ for outs in range(3):
 print("runner on first only, 0 outs, ground-ball out: double play (outs_post = 2)")
 print(f"  {g.loc[g['outs_post'] == 2, 'p'].sum():.3f} (n={int(g['n'].iloc[0]):,}, {g['source'].iloc[0]})")
 
+# FC share within ground balls (GB_OUT + FC) by base-out state, with the same PAs as the count table.
+gb = league[league["count_ok"] & league["category"].isin(["GB_OUT", "FC"])]
+fc = gb.groupby(["base_pre", "outs_pre"])["category"].agg(n_fc=lambda c: int((c == "FC").sum()), n_gb="size")
+fc = fc.reindex(pd.MultiIndex.from_product([range(8), range(3)], names=["base_pre", "outs_pre"]), fill_value=0).reset_index()
+fc["fc_share"] = fc["n_fc"] / fc["n_gb"]
+fc = fc.rename(columns={"base_pre": "base_code", "outs_pre": "outs"})
+fc.insert(1, "base_label", fc["base_code"].map(BASE_LABEL))
+fc["order"] = fc["base_code"].map(BASE_ORDER.index)
+fc = fc.sort_values(["order", "outs"]).drop(columns="order")
+print("\nFC share of ground balls (GB_OUT + FC) by base-out state")
+fg = fc.set_index(["base_label", "outs"])
+print(pd.DataFrame({o: fg.xs(o, level="outs")["fc_share"].map("{:.3f}".format) + " (" + fg.xs(o, level="outs")["n_gb"].map("{:,}".format) + ")" for o in range(3)}).reindex([BASE_LABEL[b] for b in BASE_ORDER]).to_string())
+
+# Base-out state ratio: each matchup category's share in a state divided by its overall share,
+# among the same PAs as the count table, with GB = GB_OUT + FC. Shares are shrunk toward the
+# overall share with a per-category prior strength m (state_ratio_table in pa_matchup_model.py).
+MATCHUP = ["K", "BB", "HBP", "1B", "2B", "3B", "HR", "GB", "AIR_OUT"]
+sr_src = league[league["count_ok"]].assign(mcat=lambda d: d["category"].replace({"GB_OUT": "GB", "FC": "GB"}))
+sr_src = sr_src[sr_src["mcat"].isin(MATCHUP)]
+by_state = pd.crosstab([sr_src["base_pre"], sr_src["outs_pre"]], sr_src["mcat"]).reindex(columns=MATCHUP, fill_value=0)
+srt = state_ratio_table(by_state)
+n_state = srt["n"]
+sr = srt["ratio"].stack().rename("ratio").reset_index().rename(columns={"base_pre": "base_code", "outs_pre": "outs", "mcat": "category"})
+sr["share"] = srt["share"].stack().to_numpy()
+sr["raw_ratio"] = srt["raw_ratio"].stack().to_numpy()
+sr["m"] = srt["m"].reindex(sr["category"]).to_numpy()
+sr["n"] = n_state.loc[list(zip(sr["base_code"], sr["outs"]))].to_numpy().astype(int)
+sr.insert(1, "base_label", sr["base_code"].map(BASE_LABEL))
+sr["order"] = sr["base_code"].map(BASE_ORDER.index)
+sr["cat_order"] = sr["category"].map(MATCHUP.index)
+sr = sr.sort_values(["order", "outs", "cat_order"])[["base_code", "base_label", "outs", "n", "category", "share", "raw_ratio", "m", "ratio"]]
+print("\nstate ratio shrinkage: prior strength m per category (inf = no between-state signal, ratio set to 1)")
+print("  " + ", ".join(f"{c} {m:,.0f}" for c, m in srt["m"].items()))
+print(f"\nbase-out state ratios after shrinkage (shrunk share / overall share), {len(sr_src):,} PAs; smallest state n = {int(n_state.min()):,}")
+sw = sr.assign(state=sr["base_label"] + " " + sr["outs"].astype(str), n_fmt=sr["n"].map("{:,}".format))
+grid = sw.pivot(index="state", columns="category", values="ratio")[MATCHUP]
+grid = grid.reindex([f"{BASE_LABEL[b]} {o}" for b in BASE_ORDER for o in range(3)])
+grid_print = grid.map("{:.2f}".format)
+grid_print["n"] = sw.groupby("state")["n_fmt"].first().reindex(grid.index)
+print(grid_print.to_string())
+
 OUT.mkdir(parents=True, exist_ok=True)
 count_tab.assign(p=count_tab["p"].round(6)).to_csv(OUT / "count_outcomes_v1.csv", index=False)
 plat.assign(p=plat["p"].round(6)).to_csv(OUT / "platoon_rates_v1.csv", index=False)
 adv.assign(p=adv["p"].round(6)).to_csv(OUT / "advancement_v1.csv", index=False)
 split.assign(if_share=split["if_share"].round(6)).to_csv(OUT / "single_split_v1.csv", index=False)
-print(f"\nsaved models/pa_model/count_outcomes_v1.csv ({len(count_tab)} rows), platoon_rates_v1.csv ({len(plat)} rows), advancement_v1.csv ({len(adv):,} rows), single_split_v1.csv ({len(split)} rows)")
+fc.assign(fc_share=fc["fc_share"].round(6)).to_csv(OUT / "fc_share_v1.csv", index=False)
+sr.assign(share=sr["share"].round(6), raw_ratio=sr["raw_ratio"].round(6), m=sr["m"].round(3), ratio=sr["ratio"].round(6)).to_csv(OUT / "state_ratio_v1.csv", index=False)
+print(f"\nsaved models/pa_model/count_outcomes_v1.csv ({len(count_tab)} rows), platoon_rates_v1.csv ({len(plat)} rows), advancement_v1.csv ({len(adv):,} rows), single_split_v1.csv ({len(split)} rows), fc_share_v1.csv ({len(fc)} rows), state_ratio_v1.csv ({len(sr)} rows)")

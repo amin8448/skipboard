@@ -3,6 +3,7 @@ from typing import Any
 import pytest
 
 from skipboard import GameState
+from skipboard.plate_appearance import MATCHUP_CATEGORIES, PlayerProfile, load_pa_tables
 
 BASES = {1: "runner1", 2: "runner2", 4: "runner3"}
 
@@ -34,3 +35,14 @@ def make_state(base_code: int = 0, **overrides: Any) -> GameState:
 @pytest.fixture
 def state_factory():
     return make_state
+
+
+def league_profile(role: str) -> PlayerProfile:
+    return PlayerProfile(f"league_{role}", role, tuple(load_pa_tables().league9.tolist()))  # type: ignore[arg-type]
+
+
+def scaled_profile(role: str, category: str, factor: float) -> PlayerProfile:
+    # Synthetic player: league rates with one category scaled, then renormalized.
+    rates = load_pa_tables().league9.copy()
+    rates[MATCHUP_CATEGORIES.index(category)] *= factor
+    return PlayerProfile(f"synthetic_{role}", role, tuple((rates / rates.sum()).tolist()))  # type: ignore[arg-type]
