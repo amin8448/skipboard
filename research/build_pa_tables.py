@@ -7,6 +7,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pa_matchup_model import state_ratio_table  # noqa: E402
+from pitch_codes import BALLS, DOCUMENTED, ENDS, FOUL_BUNT, FOULS, NOT_PITCHES, NOT_THROWN, PITCHES, STRIKES, UNKNOWN  # noqa: E402,F401
 
 ROOT = Path(__file__).resolve().parent.parent
 PLAYS = ROOT / "data" / "derived" / "plays_regular_2016_2025.parquet"
@@ -19,17 +20,6 @@ CATEGORIES = ["K", "BB", "HBP", "1B", "2B", "3B", "HR", "GB_OUT", "AIR_OUT", "RO
 COUNTS = [(b, s) for b in range(4) for s in range(3)]
 COUNT_LABEL = [f"{b}-{s}" for b, s in COUNTS]
 
-# Pitch codes from https://www.retrosheet.org/eventfile.htm ("The pitches field of the play record").
-BALLS = set("BIPV")  # ball, intentional ball, pitchout, automatic/called ball (V)
-STRIKES = set("ACKMQSTO")  # automatic strike, called, unknown strike, missed bunt, swing on pitchout, swinging, foul tip, foul tip on bunt
-FOULS = set("FR")  # foul, foul on pitchout: a strike only with fewer than 2 strikes
-FOUL_BUNT = "L"  # always a strike, so a foul bunt with 2 strikes is strike three
-ENDS = set("HXY")  # hit batter, ball in play, ball in play on pitchout
-UNKNOWN = "U"  # unknown or missed pitch: a pitch, effect on the count unknown
-PITCHES = BALLS | STRIKES | FOULS | {FOUL_BUNT} | ENDS | {UNKNOWN}
-NOT_PITCHES = set("+*.123>N")  # catcher pickoff, blocked, play not involving batter, pickoffs, runner going, no pitch
-NOT_THROWN = set("VA")  # automatic ball/strike: change the count but are not thrown, and nump does not count them
-DOCUMENTED = PITCHES | NOT_PITCHES
 
 pd.set_option("display.width", 250)
 pd.set_option("display.max_columns", 40)
