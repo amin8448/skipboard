@@ -14,12 +14,14 @@ FLAGS = [
     "sh", "sf", "bunt", "ground", "fly", "line", "wp", "pb", "bk",
     "sb2", "sb3", "sbh", "cs2", "cs3", "csh", "pko1", "pko2", "pko3",
 ]
+# PA result columns not covered by FLAGS, plus batted-ball type, location and first fielder.
+RESULT = ["roe", "fc", "xi", "othout", "noout", "hittype", "loc", "firstf"]
 KEEP = [
     "gid", "date", "inning", "top_bot", "batteam", "pitteam", "batter", "pitcher",
     "bathand", "pithand", "balls", "strikes", "pitches", "nump", "pa", "event",
     "outs_pre", "outs_post", "br1_pre", "br2_pre", "br3_pre", "br1_post", "br2_post", "br3_post",
     "score_v", "score_h", "runs",
-] + FLAGS
+] + FLAGS + RESULT
 # vis_home is kept because score_v/score_h are visitor/home, and in a few games the home
 # team bats in the top half, so top_bot alone cannot say whose score is whose.
 READ = KEEP + ["vis_home", "gametype"]
