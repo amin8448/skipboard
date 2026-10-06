@@ -127,7 +127,7 @@ Selected values from the final regular-season version (2023 to 2025 tables):
 | Bottom 9th, tied, bases empty, 0 outs | 0.644 |
 | Bottom 9th, tied, runner on second, 0 outs | 0.809 |
 | Bottom 9th, down 1, runner on first, 0 outs | 0.342 |
-| Top 10th, tied, runner on second, 0 outs | 0.495 |
+| Top 10th, tied, runner on second, 0 outs | 0.494 |
 
 ### Known limits
 

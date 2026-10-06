@@ -9,6 +9,13 @@ Requires Python 3.12.
 ```
 python3.12 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -e engine
+```
+
+The last step installs the game engine (`engine/`, package `skipboard`) in editable mode. Run its tests with:
+
+```
+.venv/bin/python -m pytest engine
 ```
 
 ## Data
