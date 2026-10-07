@@ -38,6 +38,7 @@ class GameState:
     outfielders: Outfielders | None = None
     disengagements_used: int = 0
     disengagement_limit: int | None = None
+    pickoff_throws: int = 0  # pitcher pickoff throws to first earlier in this plate appearance
 
     def __post_init__(self) -> None:
         for problem in _problems(self):
@@ -77,6 +78,8 @@ def _problems(s: GameState) -> list[str]:
     runners = [r for r in (s.runner1, s.runner2, s.runner3) if r is not None]
     if len(set(runners)) < len(runners) or s.batter in runners:
         problems.append("the same player appears on two bases or as both batter and runner")
+    if s.pickoff_throws < 0:
+        problems.append(f"pickoff_throws cannot be negative, got {s.pickoff_throws}")
     if s.disengagements_used < 0:
         problems.append(f"disengagements_used cannot be negative, got {s.disengagements_used}")
     if s.disengagement_limit is not None and s.disengagements_used > s.disengagement_limit:

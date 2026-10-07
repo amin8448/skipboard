@@ -1,3 +1,4 @@
+import json
 import math
 import shutil
 from pathlib import Path
@@ -116,13 +117,27 @@ def test_two_or_more_pickoff_throws_share_one_level(model):
 
 
 @pytest.mark.parametrize("season", [2024, 2025, 2031])
-def test_missing_attribute_uses_season_fill(model, season):
-    fills = model.fill_values(season)
+@pytest.mark.parametrize("hand", ["L", "R"])
+def test_missing_attribute_uses_season_fill(model, season, hand):
+    fills = model.fill_values(season, hand)
     explicit = p_with(model, season=season,
                       runner=RunnerProfile(sprint_speed=fills["sprint_speed"], aggressiveness=fills["runner_aggressiveness"]),
                       catcher=CatcherProfile(pop_time=fills["pop_time"]),
-                      pitcher=PitcherProfile(hand="R", primary_lead=fills["pitcher_primary_lead"], lead_gained=fills["pitcher_lead_gained"]))
-    assert p_with(model, season=season) == pytest.approx(explicit, abs=1e-15)
+                      pitcher=PitcherProfile(hand=hand, primary_lead=fills["pitcher_primary_lead"], lead_gained=fills["pitcher_lead_gained"]))
+    assert p_with(model, season=season, pitcher=PitcherProfile(hand=hand)) == pytest.approx(explicit, abs=1e-15)
+
+
+def test_pitcher_fills_depend_on_hand(model):
+    left, right = model.fill_values(2025, "L"), model.fill_values(2025, "R")
+    assert left["pitcher_lead_gained"] != right["pitcher_lead_gained"]
+    assert left["pitcher_primary_lead"] != right["pitcher_primary_lead"]
+    assert left["sprint_speed"] == right["sprint_speed"] and left["pop_time"] == right["pop_time"]
+    for hand, fills in (("L", left), ("R", right)):
+        missing = p_with(model, pitcher=PitcherProfile(hand=hand, primary_lead=10.0))
+        explicit = p_with(model, pitcher=PitcherProfile(hand=hand, primary_lead=10.0, lead_gained=fills["pitcher_lead_gained"]))
+        assert missing == pytest.approx(explicit, abs=1e-15)
+    with pytest.raises(ValueError):
+        model.fill_values(2025, "S")  # type: ignore[arg-type]
 
 
 def test_switch_hitter_bats_opposite_the_pitcher(model):
@@ -136,7 +151,8 @@ def test_switch_hitter_bats_opposite_the_pitcher(model):
 def test_unfitted_season_uses_latest_fitted_season(model, season):
     assert model.fitted_seasons == (2023, 2024, 2025)
     assert model.season_used(season) == 2025
-    assert model.fill_values(season) == model.fill_values(2025)
+    assert model.fill_values(season, "L") == model.fill_values(2025, "L")
+    assert model.fill_values(season, "R") == model.fill_values(2025, "R")
     for pitch_result, balls, strikes in [("ball", 0, 0), ("strike_three", 3, 2)]:
         assert p_with(model, pitch_result, balls, strikes, season=season) == p_with(model, pitch_result, balls, strikes, season=2025)
 
@@ -176,6 +192,17 @@ def test_constraint_violation_raises(tmp_path):
     path = target / steal_model.COEFFICIENTS_FILE
     path.write_text(path.read_text().replace("sprint_speed,0.05,", "sprint_speed,-0.05,"))
     with pytest.raises(StealModelError, match="constraint"):
+        load_steal_model(target)
+
+
+def test_meta_without_hand_specific_pitcher_fills_raises(tmp_path):
+    target = copy_fixture(tmp_path)
+    path = target / steal_model.META_FILE
+    meta = json.loads(path.read_text())
+    for values in meta["fill_values_by_season"].values():
+        values["pitcher_lead_gained"] = values["pitcher_lead_gained"]["R"]
+    path.write_text(json.dumps(meta))
+    with pytest.raises(StealModelError, match="pitcher hand"):
         load_steal_model(target)
 
 

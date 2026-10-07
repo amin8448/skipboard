@@ -17,6 +17,8 @@ STAGES = {}
 ROOT = Path(__file__).resolve().parent.parent
 FIT = ROOT / "data" / "derived" / "steal" / "steal_fit_table_2023_2025.parquet"
 ATTRS = ROOT / "data" / "derived" / "steal" / "player_season_attributes_2023_2025.parquet"
+PLAYS = ROOT / "data" / "derived" / "plays_regular_2016_2025.parquet"
+PITCHER_FILLS = ["pitcher_primary_lead", "pitcher_lead_gained"]  # filled by season and pitcher hand
 SAVANT_RUNNER = ROOT / "data" / "raw" / "savant" / "runner_basestealing_2b_{}.csv"
 OUT = ROOT / "data" / "derived" / "steal"
 SEED = 2026
@@ -306,6 +308,14 @@ for name in ["A32", "B32"]:
 print("\n=== lagged-attribute check (continuous attributes from the player's previous season)")
 t = time.time()
 season_means = attrs.groupby("season")[[src for _, src in ATTR_SOURCE.values()]].mean()
+# Pitcher hand per pitcher-season: the hand he threw with most often in the Retrosheet plays.
+hands = pd.read_parquet(PLAYS, columns=["season", "pitcher", "pithand"])
+hands = hands[hands["season"].isin(ALL)].groupby(["pitcher", "season"])["pithand"].agg(lambda h: h.value_counts().index[0])
+attrs["pitcher_hand"] = [hands.get((r, s)) for r, s in zip(attrs["retro_id"], attrs["season"])]
+pitcher_rows = attrs[attrs[ATTR_SOURCE["pitcher_primary_lead"][1]].notna()]
+hand_means = pitcher_rows.groupby(["season", "pitcher_hand"])[[ATTR_SOURCE[c][1] for c in PITCHER_FILLS]].mean()
+hand_counts = pitcher_rows.groupby(["season", "pitcher_hand"]).size()
+n_no_hand = int(pitcher_rows["pitcher_hand"].isna().sum())
 
 
 def lag(df, cols):
@@ -478,19 +488,35 @@ meta = {
                 "test_2025_all_models": {k: {m: v[m] for m in ["log_loss", "brier", "auc"]} for k, v in results.items()},
                 "final_in_sample_2023_2025": final_metrics},
     "lagged_check": {"rows": lag_rows, "one_attribute_gaps": {f"{m}: {c}": g for (m, c), g in gaps.items()}, "leaks_above_0.002": leaks},
-    "fill_values_by_season": {str(s): {c: float(season_means.loc[s, ATTR_SOURCE[c][1]]) for c in used} for s in season_means.index},
+    "fill_values_by_season": {str(s): {c: ({h: float(hand_means.loc[(s, h), ATTR_SOURCE[c][1]]) for h in ("L", "R")} if c in PITCHER_FILLS
+                                           else float(season_means.loc[s, ATTR_SOURCE[c][1]])) for c in used} for s in season_means.index},
+    "fill_values_note": "season means over player-seasons; pitcher_primary_lead and pitcher_lead_gained by season and pitcher hand, over pitcher-seasons of that hand",
     "centering": {c: {"mean": st_f["mean"][c], "sd": st_f["sd"][c]} for c in st_f["mean"]},
     "count_3_2_term": "indicator for a 3-2 count; every 3-2 throw situation is a strike-three throw, so it is the 3-2 strike-three effect "
                       "on top of pitch_result=strike_three",
     "factor_levels": {"pitch_result": ["ball (reference)", "strike", "strike_three"], "count_3_2": [0, 1], "pickoff_throws": ["0 (reference)", "1", "2+"],
                       "pitchout": [0, 1], "pitcher_hand": ["R (reference)", "L"], "bat_side": ["R (reference)", "L"],
                       "season": [f"{st_f['seasons'][0]} (reference)"] + [str(s) for s in st_f["seasons"][1:]],
-                      "unseen_season": "average of the fitted season effects"},
+                      "unseen_season": "the latest fitted season's effect and fill values are used, as in the engine"},
     "unseen_player": "effect 0",
     "bootstrap": {"replicates": N_BOOT, "unit": "game", "seed": SEED + 1},
     "seed": SEED,
     "software": {"python": platform.python_version(), "numpy": np.__version__, "pandas": pd.__version__, "scipy": scipy.__version__, "lightgbm": lgb.__version__},
 }
+print("\nfill values recorded in the meta file (season means over player-seasons; pitcher attributes by hand, over pitcher-seasons of that hand):")
+fill_rows = []
+for s in season_means.index:
+    row = {"season": s}
+    for c in used:
+        if c in PITCHER_FILLS:
+            for h in ("L", "R"):
+                row[f"{c} {h}"] = hand_means.loc[(s, h), ATTR_SOURCE[c][1]]
+        else:
+            row[c] = season_means.loc[s, ATTR_SOURCE[c][1]]
+    row["pitcher-seasons L / R"] = f"{int(hand_counts.get((s, 'L'), 0))} / {int(hand_counts.get((s, 'R'), 0))}"
+    fill_rows.append(row)
+print(pd.DataFrame(fill_rows).set_index("season").to_string(float_format="{:.3f}".format))
+print(f"pitcher-seasons with lead data but no hand in the plays (left out of the hand means): {n_no_hand}")
 path = OUT / "steal_success_v1_meta.json"
 path.write_text(json.dumps(meta, indent=2))
 written[path] = 1

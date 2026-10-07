@@ -1,6 +1,7 @@
 """Steal success model: the probability the runner is safe when the catcher throws to second.
 
 A season outside the fitted levels uses the latest fitted season's effect and fill values.
+Missing attributes are filled with the season mean; pitcher attributes with the mean for the pitcher's hand.
 """
 
 import json
@@ -79,7 +80,7 @@ class StealSuccessModel:
     estimates: dict[str, float]
     centers: dict[str, float]  # continuous terms only
     fitted_seasons: tuple[int, ...]
-    fill_values_by_season: dict[int, dict[str, float]] = field(repr=False)
+    fill_values_by_season: dict[int, dict[str, dict[str, float]]] = field(repr=False)  # season -> pitcher hand -> term -> fill
 
     @classmethod
     def from_directory(cls, directory: str | Path | None = None) -> "StealSuccessModel":
@@ -88,8 +89,11 @@ class StealSuccessModel:
     def season_used(self, season: int) -> int:
         return season if season in self.fitted_seasons else self.fitted_seasons[-1]
 
-    def fill_values(self, season: int) -> dict[str, float]:
-        return dict(self.fill_values_by_season[self.season_used(season)])
+    def fill_values(self, season: int, pitcher_hand: Literal["L", "R"]) -> dict[str, float]:
+        # Runner and catcher fills are the season means; pitcher fills depend on the pitcher's hand.
+        if pitcher_hand not in ("L", "R"):
+            raise ValueError(f"pitcher hand must be L or R, got {pitcher_hand!r}")
+        return dict(self.fill_values_by_season[self.season_used(season)][pitcher_hand])
 
     def p_safe(
         self,
@@ -117,7 +121,7 @@ class StealSuccessModel:
         eta += e["pickoff_throws=1"] * (pickoff_throws == 1) + e["pickoff_throws=2+"] * (pickoff_throws >= 2)
         eta += e["pitcher_hand=L"] * (pitcher.hand == "L") + e["bat_side=L"] * (side == "L")
         eta += e.get(f"season={used}", 0.0)  # pitchout is always off
-        fills = self.fill_values_by_season[used]
+        fills = self.fill_values_by_season[used][pitcher.hand]
         profiles = {"runner": runner, "catcher": catcher, "pitcher": pitcher}
         for term, center in self.centers.items():
             role, attr = CONTINUOUS_TERMS[term]
@@ -189,12 +193,24 @@ def _load(directory: Path) -> StealSuccessModel:
     if absent:
         raise StealModelError(f"{coef_path.name} is missing terms {absent}")
 
-    fills: dict[int, dict[str, float]] = {}
+    fills: dict[int, dict[str, dict[str, float]]] = {}
     for season in seasons:
         values = meta["fill_values_by_season"].get(str(season))
         if values is None or any(term not in values for term in centers):
             raise StealModelError(f"{meta_path.name}: fill values for season {season} must cover {sorted(centers)}")
-        fills[season] = {term: float(values[term]) for term in centers}
+        fills[season] = {"L": {}, "R": {}}
+        for term in centers:
+            value = values[term]
+            if CONTINUOUS_TERMS[term][0] == "pitcher":
+                if not isinstance(value, dict) or set(value) != {"L", "R"}:
+                    raise StealModelError(f"{meta_path.name}: {term} fill for season {season} must be given by pitcher hand (L and R)")
+                for hand in ("L", "R"):
+                    fills[season][hand][term] = float(value[hand])
+            else:
+                if isinstance(value, dict):
+                    raise StealModelError(f"{meta_path.name}: {term} fill for season {season} must be a single number")
+                for hand in ("L", "R"):
+                    fills[season][hand][term] = float(value)
     return StealSuccessModel(estimates=estimates, centers=centers, fitted_seasons=seasons, fill_values_by_season=fills)
 
 
