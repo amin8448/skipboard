@@ -1,0 +1,17 @@
+term,estimate,se,constraint,centering_mean
+intercept,1.5,0.1,none,
+runner_aggressiveness,4.0,1.0,none,0.08
+pitch_result=strike,-0.2,0.1,none,
+pitch_result=strike_three,0.1,0.1,none,
+count=3-2,-1.0,0.1,none,
+pickoff_throws=1,-0.1,0.1,none,
+pickoff_throws=2+,-0.2,0.1,none,
+pitchout,-0.5,0.3,none,
+pitcher_hand=L,0.9,0.1,none,
+bat_side=L,-0.2,0.1,none,
+season=2024,-0.1,0.1,none,
+season=2025,-0.15,0.1,none,
+sprint_speed,0.05,0.02,>= 0,28.0
+pop_time,6.0,0.5,>= 0,2.0
+pitcher_primary_lead,0.2,0.1,>= 0,10.0
+pitcher_lead_gained,0.3,0.05,>= 0,4.0

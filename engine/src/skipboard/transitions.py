@@ -31,6 +31,11 @@ def load_advancement(models_dir: str | Path | None = None) -> AdvancementTables:
     return _load(path / PA_DIR / ADVANCEMENT_FILE)
 
 
+def load_advancement_file(path: str | Path) -> AdvancementTables:
+    # Any table with the advancement_v1 layout, such as models/steal/advancement_going_v1.csv.
+    return _load(Path(path).resolve())
+
+
 @lru_cache(maxsize=None)
 def _load(path: Path) -> AdvancementTables:
     if not path.exists():

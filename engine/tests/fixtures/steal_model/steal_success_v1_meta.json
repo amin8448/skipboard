@@ -1,0 +1,30 @@
+{
+  "note": "synthetic numbers for tests, not estimated from data",
+  "specification": "A32",
+  "seasons": {"evaluation_train": [2023, 2024], "evaluation_test": [2025], "final_fit": [2023, 2024, 2025]},
+  "penalties": null,
+  "fill_values_by_season": {
+    "2023": {"sprint_speed": 27.0, "pop_time": 2.0, "pitcher_primary_lead": 10.5, "pitcher_lead_gained": 3.0, "runner_aggressiveness": 0.04},
+    "2024": {"sprint_speed": 27.5, "pop_time": 1.95, "pitcher_primary_lead": 10.4, "pitcher_lead_gained": 3.5, "runner_aggressiveness": 0.05},
+    "2025": {"sprint_speed": 27.2, "pop_time": 1.97, "pitcher_primary_lead": 10.6, "pitcher_lead_gained": 3.3, "runner_aggressiveness": 0.045}
+  },
+  "centering": {
+    "sprint_speed": {"mean": 28.0, "sd": 1.0},
+    "pop_time": {"mean": 2.0, "sd": 0.05},
+    "pitcher_primary_lead": {"mean": 10.0, "sd": 0.5},
+    "pitcher_lead_gained": {"mean": 4.0, "sd": 1.0},
+    "runner_aggressiveness": {"mean": 0.08, "sd": 0.04}
+  },
+  "count_3_2_term": "indicator for a 3-2 count; every 3-2 throw situation is a strike-three throw",
+  "factor_levels": {
+    "pitch_result": ["ball (reference)", "strike", "strike_three"],
+    "count_3_2": [0, 1],
+    "pickoff_throws": ["0 (reference)", "1", "2+"],
+    "pitchout": [0, 1],
+    "pitcher_hand": ["R (reference)", "L"],
+    "bat_side": ["R (reference)", "L"],
+    "season": ["2023 (reference)", "2024", "2025"],
+    "unseen_season": "latest fitted season"
+  },
+  "unseen_player": "effect 0"
+}
