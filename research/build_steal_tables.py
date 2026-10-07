@@ -7,6 +7,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pitch_codes import BALLS, ENDS, FOUL_BUNT, FOULS, NOT_THROWN, PITCHES, STRIKES, count_after  # noqa: E402
+from steal_pitches import PITCH_LIKE, add_segments, going_at, pitch_rows  # noqa: E402
 
 T0 = time.time()
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,8 +27,6 @@ GOING_BASES = (1, 5)  # runner on first, second open
 RESULTS = ["ball", "ball_four", "hit_by_pitch", "strike", "strike_three", "foul", "in_play", "other"]
 PITCHOUT = set("PQRY")
 SWINGS = set("SFTXMQRYLO")  # swinging strike, foul, foul tip, in play, missed bunt, swings at pitchouts, foul bunts
-PITCH_LIKE = PITCHES | {"N"}  # rows are written for pitches and no-pitches
-LATER_PLAY = PITCHES | {"N"}  # a pitch or no-pitch after this one means the row's event did not follow this pitch
 IN_PLAY_CATS = ["1B_IF", "1B_OF", "2B", "3B", "HR", "GB_OUT", "AIR_OUT", "ROE", "FC", "OTHER"]
 ADV_COLS = ["base_pre", "outs_pre", "category", "base_post", "outs_post", "runs", "k", "n", "p", "n_cell", "source"]
 MIN_N = 30
@@ -56,39 +55,6 @@ def result_category(code, balls, strikes):
     if code in ENDS:
         return "in_play"
     return "other"
-
-
-def going_at(seq, pos):
-    # '>' applies to the next pitch; only '*' (blocked) or another '>' may sit between them.
-    j = pos - 1
-    while j >= 0 and seq[j] in "*>":
-        if seq[j] == ">":
-            return True
-        j -= 1
-    return False
-
-
-def pitcher_pickoffs(prefix):
-    return sum(1 for i, ch in enumerate(prefix) if ch == "1" and (i == 0 or prefix[i - 1] != "+"))
-
-
-def later_play(seq, pos):
-    # Another pitch, no-pitch or pitcher pickoff throw after this pitch in the row: the row's event did not
-    # happen on this pitch. Catcher throws ('+' then a digit) belong to the pitch before them.
-    rest = seq[pos + 1:]
-    for i, ch in enumerate(rest):
-        if ch in LATER_PLAY:
-            return True
-        if ch in "123" and (seq[pos + i] != "+"):
-            return True
-    return False
-
-
-def common_prefix(a, b):
-    k = 0
-    while k < min(len(a), len(b)) and a[k] == b[k]:
-        k += 1
-    return k
 
 
 def event_category(row):
@@ -132,41 +98,12 @@ plays.loc[pa_rows, "pa_excluded"] = pa_out["excluded"].to_numpy()
 plays["event_cat"] = [event_category(r) for r in plays[["event", "sb2", "cs2", "sbh", "sb3", "wp", "pb", "bk"]].itertuples()]
 plays["seq"] = plays["pitches"].fillna("")
 
-# Plate-appearance groups: a new group starts with a new half-inning or after a PA-ending row. Within a
-# group each row's sequence repeats the earlier rows' pitches, so a row's own pitches are what it adds.
-new_group = (plays["half_id"] != plays["half_id"].shift()) | (plays["pa"].shift() == 1)
-plays["pa_group"] = new_group.cumsum()
+n_mismatch = add_segments(plays)
 plays["pa_group_excluded"] = plays.groupby("pa_group")["pa_excluded"].transform("max").astype(bool)
-prev_seq = plays.groupby("pa_group")["seq"].shift().fillna("")
-prefix_ok = np.array([s.startswith(p) for s, p in zip(plays["seq"], prev_seq)])
-plays["seg_start"] = [len(p) if ok else common_prefix(s, p) for s, p, ok in zip(plays["seq"], prev_seq, prefix_ok)]
-print(f"rows whose sequence does not extend the previous row's in the same PA (segment starts at the common prefix): {int((~prefix_ok).sum()):,}")
+print(f"rows whose sequence does not extend the previous row's in the same PA (segment starts at the common prefix): {n_mismatch:,}")
 
 rows = plays[plays["base_pre"].isin(GOING_BASES) & plays["seq"].str.len().gt(0)]
-cols = {k: [] for k in ["row", "pos", "code", "going", "balls", "strikes", "pitcher_pickoffs_before", "catcher_pickoffs_before",
-                         "pitch_number", "last_play", "pa_ended", "catcher_throw_after"]}
-for r in rows[["seq", "seg_start", "pa"]].itertuples():
-    seq = r.seq
-    for pos in range(r.seg_start, len(seq)):
-        ch = seq[pos]
-        if ch not in PITCH_LIKE:
-            continue
-        prefix = seq[:pos]
-        later = later_play(seq, pos)
-        b, s = count_after(prefix)
-        cols["row"].append(r.Index)
-        cols["pos"].append(pos)
-        cols["code"].append(ch)
-        cols["going"].append(going_at(seq, pos))
-        cols["balls"].append(b)
-        cols["strikes"].append(s)
-        cols["pitcher_pickoffs_before"].append(pitcher_pickoffs(prefix))
-        cols["catcher_pickoffs_before"].append(prefix.count("+"))
-        cols["pitch_number"].append(sum(c in PITCHES for c in prefix) + 1 if ch in PITCHES else np.nan)
-        cols["last_play"].append(not later)
-        cols["pa_ended"].append(r.pa == 1 and not any(c in PITCHES for c in seq[pos + 1:]))
-        cols["catcher_throw_after"].append((not later) and "+" in seq[pos + 1:])
-pitch = pd.DataFrame(cols)
+pitch = pitch_rows(rows)
 row_cols = ["gid", "date", "season", "inning", "top_bot", "outs_pre", "base_pre", "batter", "bathand", "pitcher", "pithand", "f2",
             "br1_pre", "event", "event_cat", "pa_category", "pa_excluded", "pa_group_excluded", "sb2", "cs2", "seq"]
 pitch = pitch.join(plays[row_cols], on="row")

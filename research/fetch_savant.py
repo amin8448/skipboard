@@ -1,4 +1,7 @@
+import datetime
 import io
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -11,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RAW = ROOT / "data" / "raw"
 SEASON_DIR = RAW / "savant"
 SAVANT = "https://baseballsavant.mlb.com/leaderboard"
+MANIFEST = SEASON_DIR / "manifest.csv"
 
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 250)
@@ -108,6 +112,77 @@ def fetch_default():
     runner_basestealing(DEFAULT_YEAR, RAW / f"runner_basestealing_{DEFAULT_YEAR}.csv")
 
 
+def check_season(df, year, columns, url):
+    # Savant falls back to the current season when it does not recognise a parameter.
+    for col in columns:
+        seen = sorted(pd.to_numeric(df[col]).unique().tolist())
+        if seen != [year]:
+            raise SystemExit(f"season check failed for {url}: {col} = {seen}, requested {year}")
+
+
+def add_to_manifest(path, url, rows):
+    new = not MANIFEST.exists()
+    line = pd.DataFrame([{"file": path.name, "url": url, "download_date": datetime.date.today().isoformat(), "rows": rows}])
+    line.to_csv(MANIFEST, mode="a", header=new, index=False)
+
+
+def show_header(path):
+    print(f"\n=== {path.name}: {len(pd.read_csv(path))} rows")
+    print(f"columns: {list(pd.read_csv(path, nrows=0).columns)}")
+
+
+def runner_basestealing_2b(year, path):
+    # Steals of second only; n=1 is the lowest minimum the endpoint accepts (n=0 falls back to a smaller set).
+    url = (
+        f"{SAVANT}/basestealing-run-value?game_type=Regular&n=1&pitch_hand=all&runner_moved=All"
+        f"&target_base=2B&prior_pk=All&season_start={year}&season_end={year}&split=no&team=&type=Bat"
+        f"&with_team_only=1&csv=true"
+    )
+    content = fetch_csv(url)
+    df = pd.read_csv(io.BytesIO(content))
+    check_season(df, year, ["start_year", "end_year"], url)
+    path.write_bytes(content)
+    add_to_manifest(path, url, len(df))
+    show_header(path)
+
+
+def catcher_poptime_page(year, path):
+    # The pop time CSV export has no season column; the page embeds the same leaderboard with a year field and
+    # second-base exchange and arm strength. min2b=0 and min3b=0 are the lowest minimums the page accepts.
+    url = f"{SAVANT}/poptime?year={year}&team=&min2b=0&min3b=0"
+    resp = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    html = resp.text
+    m = re.search(r"(?:var|let|const)\s+data\s*=\s*", html)
+    if m is None:
+        raise SystemExit(f"no embedded data found at {url}")
+    start = html.find("[", m.end())
+    depth = 0
+    for end in range(start, len(html)):
+        if html[end] == "[":
+            depth += 1
+        elif html[end] == "]":
+            depth -= 1
+            if depth == 0:
+                break
+    df = pd.DataFrame(json.loads(html[start:end + 1]))
+    if df.empty:
+        raise SystemExit(f"no rows returned from {url}")
+    check_season(df, year, ["year"], url)
+    df.to_csv(path, index=False)
+    add_to_manifest(path, url, len(df))
+    show_header(path)
+
+
+def fetch_steal_fit(years):
+    # Leaderboards the steal success model needs beyond the S1 pulls.
+    SEASON_DIR.mkdir(parents=True, exist_ok=True)
+    for year in years:
+        print(f"\n########## {year}")
+        runner_basestealing_2b(year, SEASON_DIR / f"runner_basestealing_2b_{year}.csv")
+        catcher_poptime_page(year, SEASON_DIR / f"catcher_poptime_page_{year}.csv")
+
+
 def fetch_seasons(years):
     SEASON_DIR.mkdir(parents=True, exist_ok=True)
     for year in years:
@@ -120,7 +195,10 @@ def fetch_seasons(years):
 
 if __name__ == "__main__":
     # No arguments: the 2026 download. With seasons, e.g. 2023 2024 2025: steal-related leaderboards per season.
-    if len(sys.argv) > 1:
+    # With --steal-fit and seasons: the extra leaderboards for the steal success model.
+    if len(sys.argv) > 1 and sys.argv[1] == "--steal-fit":
+        fetch_steal_fit([int(y) for y in sys.argv[2:]])
+    elif len(sys.argv) > 1:
         fetch_seasons([int(y) for y in sys.argv[1:]])
     else:
         fetch_default()
