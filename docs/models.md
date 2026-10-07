@@ -1,6 +1,6 @@
 # Models
 
-Three models score game situations: a run expectancy table (re24_v1), a win probability model (wp v1), and a plate-appearance model (pa v1). All are built from Retrosheet regular-season play-by-play data (see `docs/retrosheet_notice.md`). The first two are league-average models: they describe a typical team, not the teams on the field. The plate-appearance model adds the batter and pitcher.
+Four models score game situations: a run expectancy table (re24_v1), a win probability model (wp v1), a plate-appearance model (pa v1), and a steal-of-second model (steal v1). The first three are built from Retrosheet regular-season play-by-play data alone (see `docs/retrosheet_notice.md`). The first two are league-average models: they describe a typical team, not the teams on the field. The plate-appearance model adds the batter and pitcher. The steal model's success component also uses Baseball Savant season aggregates, which MLB permits only for non-commercial use: data files derived from Savant stay under `data/` and are not tracked, and the coefficient table documented below is a snapshot of the fitted model (see section 10, "Data sources and rights", in `docs/SCOPE.md`).
 
 ## Valuation principle
 
@@ -13,19 +13,24 @@ Decision values are anchored. The level comes from the empirical tables, and the
 - Both engine terms use the same platoon and base-out state settings. With league-average players at 0-0 the two engine terms are identical, so the value equals the table exactly.
 - Decision modules use `value_wp` and `value_runs` (`engine/src/skipboard/valuation.py`). `continue_pa_wp` and `continue_pa_runs` stay available as the raw model.
 
-Why anchor: the raw plate-appearance model differs from the tables by up to 0.051 runs in a single state (see "Consistency checks and tolerances"). Those gaps are not equal across the states a decision compares, so they do not fully cancel. The raw model's steal break-even rate differed from the tables' by up to 3 percentage points, which is enough to flip a verdict on an attempt near break-even. Anchored, league-average players reproduce the tables' break-even exactly.
+Why anchor: the raw plate-appearance model differs from the tables by up to 0.051 runs in a single state (see "Consistency checks and tolerances"). Those gaps are not equal across the states a decision compares, so they do not fully cancel. The raw model's steal break-even rate differed from the tables' by up to 3 percentage points, which is enough to flip a verdict on an attempt near break-even. Anchored, league-average players at 0-0 reproduce the tables exactly, so every option in a decision starts from the tables' level.
 
-Example: the steal. Each option is valued with `value_wp` (or `value_runs`) at the state it leads to, with the same batter, pitcher and count:
+Example: the steal of second. "Not this pitch" is the anchored continuation at the current count: `value_wp` (or `value_runs`) of the current state with the same batter and pitcher. "Run on this pitch" is a mixture over what the pitch does with the runner going: ball, strike, strike three, foul, hit by pitch, ball four or in play, each valued at the state it leads to. Where the catcher throws (a ball, a strike, or strike three with fewer than 2 outs), that branch splits into safe and out by the success model. See "Steal of second (steal v1)".
 
-| Option | State valued |
-|---|---|
-| Hold | Current state, runner stays |
-| Steal succeeds | Runner on the next base, same count and outs |
-| Steal fails | Runner out and base cleared, one more out (if that is the third out, the half-inning ends and the value is the next half-inning's) |
+Player information moves the answer. Five real 2025 matchups, with a runner on first, 0 outs and a 0-0 count, the bottom of the 7th tied, and each matchup's own runner, catcher and pitcher (`research/steal_break_even_examples.py`):
 
-The value of attempting is the success probability times the success value plus the failure probability times the failure value. That is compared with the value of holding.
+| Matchup | Effective throw success | Break-even, runs | Break-even, win probability | Run minus hold, runs |
+|---|---|---|---|---|
+| Strong hitter vs average pitcher | 0.707 | 0.780 | 0.714 | -0.055 |
+| Weak hitter vs average pitcher | 0.802 | 0.670 | 0.604 | +0.091 |
+| Average hitter vs high-strikeout pitcher | 0.815 | 0.725 | 0.661 | +0.063 |
+| Strong hitter vs high-strikeout pitcher (left-handed) | 0.774 | 0.762 | 0.700 | +0.010 |
+| Weak hitter vs high-strikeout pitcher | 0.781 | 0.675 | 0.607 | +0.075 |
+| Baseline, right-handed pitcher | 0.768 | 0.706 | 0.638 | +0.046 |
+| Baseline, left-handed pitcher | 0.789 | 0.704 | 0.637 | +0.063 |
+| League-average attempt | 0.811 | 0.706 | 0.638 | +0.078 |
 
-Player information moves the answer. For five real 2025 matchups with a runner on first, 0 outs and a 0-0 count, the anchored break-even ranged from 3.5 percentage points below the league table (weak hitters) to 6.9 points above it (a strong power hitter), in runs and in win probability for the bottom of the 7th tied (`research/steal_break_even_examples.py`). Against a strong hitter, an out on the bases costs more, so an attempt needs a higher success rate.
+The baselines use league-average batter and pitcher, and runner, catcher and pitcher attributes at the 2025 fill values for the pitcher's hand. The league-average attempt uses the same players, with the throw success on each throw branch set to the empirical safe rate for that pitch result and count on the fit table (2023 to 2025, pitchouts excluded): 0.830 on a ball and 0.789 on a strike at 0-0. Against a strong hitter an out on the bases costs more, so the break-even rises by up to 7.4 points over the baseline and running loses value. The league-average attempt succeeds more often than the model baseline (0.811 against 0.768), because real attempts come from faster and more aggressive runners than the league-average profile.
 
 ## Run expectancy (re24_v1)
 
@@ -328,3 +333,272 @@ The diagnostic test tolerances are the largest observed gap plus a margin, set a
 - **Some advancement cells are pooled across outs,** mostly triples, errors and fielder's choices with runners on third.
 - **Base-out state ratios are league-wide.** They are the same for every matchup and every count.
 - **`continue_pa` does not model steals, wild pitches or balks,** and treats half-innings as memoryless. Its values differ from the run expectancy table by up to 0.051 runs in a single state.
+
+## Steal of second (steal v1)
+
+### Purpose
+
+The value of sending the runner from first on the next pitch, compared with holding. The fan picks one of two options: "run on this pitch" or "not this pitch". The model has three parts: running-game tables built from Retrosheet, a success model for the catcher's throw, and a decision module that combines them with the plate-appearance model.
+
+The decision is offered with a runner on first only (second and third empty), at any count except 3-2 with 2 outs. There the runner goes automatically: from 2023 to 2025 the runner went on 6,155 of 6,200 such pitches (99.3%), so there is nothing to decide.
+
+### Inputs
+
+| Input | Values |
+|---|---|
+| Game state | Runner on first only, count, outs, inning, half and score (for win probability), batter side, season |
+| Pickoff throws | Pitcher pickoff throws to first earlier in the plate appearance |
+| Batter and pitcher | Plate-appearance profiles as in pa v1; league average if absent |
+| Runner | Sprint speed (ft/s), aggressiveness |
+| Catcher | Pop time to second (s) |
+| Pitcher holding the runner | Hand, primary lead allowed (ft), lead gained (secondary minus primary lead allowed, ft) |
+
+Any runner, catcher or pitcher attribute may be missing; missing values are filled (see "Fill values").
+
+Output: the hold and run values in win probability and runs, the branches, the effective throw success (the share-weighted success probability over the throw branches), and the break-even throw success in each currency.
+
+### Data and seasons
+
+- Running-game tables: Retrosheet pitch sequences, regular seasons 2023 to 2025, with a few cells from a wider window, 2016 to 2025 without 2019 (see "Coverage"). 69,318 pitches with a runner on first and second open carry the runner-going marker; 58,228 of them have a runner on first only.
+- Success model: 8,649 throw situations from 2023 to 2025 (2,802, 2,914 and 2,933 by season). Evaluation trains on 2023 to 2024 (5,716) and tests on 2025 (2,933). The final fit uses all three seasons.
+- Player attributes: Baseball Savant season leaderboards, 2023 to 2025, linked to Retrosheet IDs through the Chadwick register (see `docs/chadwick_notice.md`).
+- Scripts: `research/build_steal_attempts.py` (steal attempt table), `research/steal_pitches.py` (pitch-level helpers), `research/build_steal_tables.py` (running-game tables), `research/fetch_savant.py` and `research/fetch_chadwick.py` (downloads), `research/build_steal_fit_table.py` (player attributes and fit table), `research/fit_steal_success.py` (success model), `research/steal_break_even_examples.py` (examples).
+- Tracked files in `models/steal/`: `pitch_result_going_v1.csv`, `advancement_going_v1.csv`, `inplay_outcomes_by_count_v1.csv`, `fc_share_going_v1.csv`. These use Retrosheet only.
+- Not tracked, in `data/derived/steal/`: `steal_success_v1_coefficients.csv`, `steal_success_v1_meta.json`, `steal_success_v1_player_effects.csv` (header only, because the production model has no player effects), `player_season_attributes_2023_2025.parquet`, `steal_fit_table_2023_2025.parquet`.
+
+### Method: decision
+
+"Not this pitch" is `value_wp` (or `value_runs`) of the current state, with the same batter and pitcher (see "Valuation principle"). "Run on this pitch" is the sum, over pitch results, of the result's share at the count (`pitch_result_going_v1.csv`) times the value of its branch:
+
+| Pitch result | Branch |
+|---|---|
+| Ball | Throw. Safe: runner on second, one more ball. Out: bases empty, one more out, one more ball. |
+| Strike | Throw. As for a ball, with one more strike. |
+| Strike three, 0 or 1 out | Throw. Safe: batter out, runner on second. Out: double play. The plate appearance ends. |
+| Strike three, 2 outs | Third out, no throw. |
+| Ball four, hit by pitch | Runners on first and second. The plate appearance ends. |
+| Foul | One more strike below 2 strikes. At 2 strikes the state is unchanged, so the branch equals holding. |
+| In play | In-play outcome mix at the count, then advancement with the runner going. The plate appearance ends. |
+
+- **States within the plate appearance** (after a ball, a strike, a foul, or a caught stealing that is not the third out) are valued with `value_wp` and `value_runs`, with the same batter and pitcher at the new count.
+- **States that end the plate appearance** are valued at the tables: win probability, or run expectancy plus runs scored, for the new base-out state. This is the value of the next plate appearance starting at 0-0 with league-average players; the on-deck batter is not modeled. A caught stealing for the third out ends the half-inning.
+- **In play.** The league in-play mix at the count (`inplay_outcomes_by_count_v1.csv`) is multiplied by the matchup's ratio to league for each category (platoon on, base-out state ratio off): both kinds of single by the 1B ratio, extra-base hits and air outs by their own, ground balls by the GB ratio, and ROE stays at league. Ground balls are split into GB_OUT and FC by the going FC share. The mix is renormalized, and each category's states come from `advancement_going_v1.csv`.
+- **Break-even.** The single success probability on every throw branch at which running equals holding, found by bisection on [0, 1] with 100 steps. If no probability in [0, 1] equalizes the two, there is no break-even.
+
+### Method: running-game tables
+
+**The runner-going marker.** Retrosheet pitch sequences mark a pitch on which the runner went with ">". The marker recovers what the steal record cannot: every pitch the runner went on, including those fouled off or put in play (which erase the attempt) and ball four (the walk forces the runner, so no steal is credited).
+
+**Coverage.** The share of steals of second (runner on first, second open) whose steal pitch carries the marker:
+
+| Season | 2016 | 2017 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Marked | 0.873 | 0.877 | 0.868 | 0.000 | 0.929 | 0.926 | 0.933 | 0.939 | 0.938 | 0.940 |
+
+The 2019 files carry no markers, so 2019 is left out of every window. In every season, 93% to 94% of these steals happen on a pitch; the rest happen on a pickoff throw or a no-pitch.
+
+**Reconciliation with the steal attempt table** (`data/derived/steal_attempts_2023_2025.parquet`, 2023 to 2025). The attempt table has 10,374 main attempts. Removing those with runners on first and third (1,711), the strike-three attempts (896) and the steal pitches with no marker (10) leaves 7,757. The marker table has 7,764 marked balls and strikes followed by a steal, a caught stealing, or a caught stealing negated by an error. The difference of 7 is pitches followed by a catcher's pickoff throw on which the runner was caught. The attempt table filed these as pickoff caught stealing or not on a pitch; here a catcher's throw belongs to the pitch before it. The marker table also has 2,151 marked ball-four pitches, which the steal record never counts as attempts.
+
+**Swing rate.** Batters swing less when the runner goes, except at 1-2 and 3-2, where the rates match. Swing rates from 2023 to 2025 with a runner on first and second open:
+
+| Count | 0-0 | 1-0 | 2-0 | 0-1 | 1-1 | 1-2 | 3-2 |
+|---|---|---|---|---|---|---|---|
+| Runner going | 0.225 | 0.283 | 0.238 | 0.431 | 0.484 | 0.589 | 0.710 |
+| All pitches | 0.340 | 0.433 | 0.420 | 0.506 | 0.547 | 0.589 | 0.708 |
+
+So what the pitch does differs when the runner goes, and the decision needs its own pitch-result table.
+
+**Pitch-result table** (`pitch_result_going_v1.csv`). For each count, the share of marked pitches (runner on first only) by result.
+- Seasons 2023 to 2025, except 3-0. That count has only 53 marked pitches in those seasons, so it comes from the wider window (152).
+- 3-2 with 2 outs is excluded (the runner goes automatically); 3-2 uses 0 and 1 out.
+- Plate appearances flagged excluded (bunts and intentional walks, 77 marked pitches) are removed.
+
+| Count | Ball (ball four at 3-2) | Strike (strike three at 3-2) | Foul | In play | Hit by pitch | Pitches |
+|---|---|---|---|---|---|---|
+| 0-0, runner going | 0.454 | 0.379 | 0.094 | 0.072 | 0.000 | 3,107 |
+| 0-0, runner not going (for comparison) | 0.380 | 0.369 | 0.128 | 0.120 | 0.003 | 108,733 |
+| 3-2, runner going | 0.236 | 0.181 | 0.292 | 0.291 | 0.000 | 2,753 |
+
+**Advancement with the runner going** (`advancement_going_v1.csv`). For plate appearances ending on a marked pitch put in play, the table gives the distribution of base state, outs and runs after each in-play category. Runner on first only, innings 1 to 8, bunts and intentional walks excluded: 4,166 plate appearances from 2023 to 2025, and 11,556 in the wider window. Each cell (category and outs) takes the first of these that applies:
+1. Data from 2023 to 2025, if the cell has at least 30 plate appearances.
+2. Otherwise, data from the wider window, if at least 30.
+3. Otherwise, the same category pooled across outs in the wider window, if at least 30.
+4. Otherwise, a rule for HR (everyone scores) or OTHER (catcher's interference: batter to first, runner to second).
+5. Otherwise, the standard table (`advancement_v1`, all plate appearances, 2023 to 2025).
+
+Of the 30 cells, 21 come from data, 3 are pooled, 3 use the rule (OTHER at every out count) and 3 use the standard table (FC at every out count). The runner going changes advancement a lot. All going values below are 2023 to 2025 data cells; `advancement_v1` covers all plate appearances, runner going or not.
+
+| Measure | Outs | Runner going | advancement_v1 |
+|---|---|---|---|
+| Outfield single: runner to third or home | 0 / 1 / 2 | 0.818 / 0.847 / 0.811 | 0.291 / 0.318 / 0.407 |
+| Double: runner scores | 0 / 1 / 2 | 0.627 / 0.610 / 0.770 | 0.290 / 0.327 / 0.502 |
+| Ground-ball out: double play | 0 / 1 | 0.130 / 0.050 | 0.492 / 0.486 |
+| Air out: runner doubled off | 0 / 1 | 0.185 / 0.187 | 0.029 / 0.031 |
+
+**In-play outcomes by count** (`inplay_outcomes_by_count_v1.csv`).
+- **Population.** The mix by count comes from all plate appearances ending on a ball in play with a runner on first and second open, runner going or not: 72,968 plate appearances from 2023 to 2025, innings 1 to 8.
+- **Exclusions.** Catcher's interference (259 plate appearances recorded with an in-play pitch code) is dropped.
+- **Why the runner-on-first version.** The steal decision exists only in those states, so that version is saved. Compared with the version over all base-out states, it differs by more than 0.01 in 19 cells (counts with at least 500 plate appearances). Most of these are more outfield singles (0.012 to 0.018) and fewer ground-ball outs (0.010 to 0.019).
+- **Check against going balls in play.** Over the 4,150 balls in play on going pitches, the overall mix is close: outfield singles 0.197 against 0.189, ground-ball outs 0.303 against 0.295.
+
+**Going FC share** (`fc_share_going_v1.csv`). Fielder's choices as a share of ground balls (GB_OUT plus FC) among marked in-play endings, runner on first only, wider window: 0.016, 0.009 and 0.002 at 0, 1 and 2 outs (11 of 704, 8 of 925, 4 of 1,829). The standard `fc_share_v1` has 0.035, 0.032 and 0.006. This is consistent with the lead runner rarely being retired when already running.
+
+### Method: success model
+
+**Fit population.** A throw situation is a marked pitch with result ball, strike or strike three, runner on first only, followed by a steal of second, a caught stealing, or a caught stealing negated by an error (counted as safe).
+- **Size.** 8,649 throw situations from 2023 to 2025, with a safe rate of 0.797.
+- **Left out.** A runner caught on the catcher's throw to first after the pitch (7). Ball four, fouls and balls in play, where no throw is made. Defensive indifference and other advances with no throw.
+- **Consequence.** The model predicts success given a throw. Counting the 575 cases of defensive indifference on the same pitches as successes would raise the base rate from 0.797 to 0.810.
+
+**Attributes.** Season aggregates by player, 2023 to 2025:
+
+| Attribute | Source | Column |
+|---|---|---|
+| Runner sprint speed (ft/s) | Savant Sprint Speed leaderboard | `sprint_speed` |
+| Catcher pop time to second (s) | Savant Catcher Pop Time leaderboard (data embedded in the page) | `pop_2b_sba` |
+| Pitcher primary lead allowed (ft) | Savant Pitcher Running Game leaderboard, steals of second | `r_primary_lead` |
+| Pitcher lead gained (ft) | Savant Pitcher Running Game leaderboard, steals of second | `r_sec_minus_prim_lead` |
+| Runner aggressiveness | Retrosheet pitch sequences | See below |
+| Candidates not used: runner lead gained on attempts and on opportunities | Savant Basestealing Run Value leaderboard, steals of second | `r_sec_minus_prim_lead_sbx`, `r_sec_minus_prim_lead` |
+| Candidates not used: catcher exchange and arm strength | Savant Catcher Pop Time page | `exchange_2b_sba`, `maxeff_arm_2b_sba` |
+
+- **Linking IDs.** Savant uses MLBAM IDs. The Chadwick register maps them to Retrosheet IDs: 24,622 people have both, with no ambiguous links, and every leaderboard row mapped.
+- **Season check.** Every leaderboard file with a season column passed a check that it holds the requested season.
+- **Coverage.** The attribute table has 4,327 player-seasons. Among throw situations, at most 0.3% of rows are missing any one attribute (sprint speed).
+
+**Runner aggressiveness.** The share of thrown pitches on which the runner goes, with the runner on first and second open, by runner-season.
+- **Population.** 454,040 pitches from 2023 to 2025. 3-2 with 2 outs is removed (7,377 pitches, 7,338 of them marked), because the runner goes automatically.
+- **League rates.** 0.0413, 0.0457 and 0.0425 by season.
+- **Shrinkage.** Each runner's rate is pulled toward the season's league rate: (going + m x league rate) / (pitches + m). The prior strength m = 15.0 pitches is estimated by method of moments across 1,924 runner-seasons, as for the base-out state ratios.
+
+**Covariates and constraints.** A logistic regression for safe, with these terms:
+
+| Term | Levels or form |
+|---|---|
+| Pitch result | Ball (reference), strike, strike three |
+| 3-2 count | Indicator. Every 3-2 throw situation is a strike-three throw (490 of 490), so this is the 3-2 strike-three effect on top of strike three. |
+| Pickoff throws | Pitcher throws to first earlier in the plate appearance: 0 (reference), 1, 2 or more |
+| Pitchout | Indicator. The engine always evaluates with no pitchout. |
+| Pitcher hand, batter side | Right-handed is the reference; switch hitters bat opposite the pitcher |
+| Season | 2023 (reference), 2024, 2025 |
+| Sprint speed, pop time, pitcher primary lead, pitcher lead gained | Slopes constrained to be non-negative, written as the exponential of a free parameter |
+| Runner aggressiveness | Slope unconstrained |
+
+During fitting, continuous attributes are centered on the fit-table mean and scaled by its standard deviation. Coefficients are reported per unit.
+
+**Fitting.**
+- **Estimation.** Penalized maximum likelihood (L-BFGS-B), with a ridge of 0.0001 on the fixed effects other than the intercept for numerical stability.
+- **Player effects.** The specifications with player effects (B32, B-arm32) add one ridge-penalized effect per runner, catcher and pitcher.
+- **Penalty search.** The three penalties are chosen by five-fold cross-validation, with folds split by game (3,243 training games). The grid has eight values from 1 to 3,162. The search starts from the best common value, then moves one penalty at a time. Chosen: runner 10, catcher 31.6, pitcher 31.6 (29 settings evaluated).
+- **Selection rule.** A specification with player effects replaces A32 only if it beats A32 by more than 0.002 in 2025 log loss.
+- **Benchmark.** LightGBM (C) is a benchmark only. It uses the same folds and monotone directions, with num_leaves 4, 8 or 16 and min_data_in_leaf 50, 100 or 200. The chosen setting is 16 and 100, with 45 rounds.
+
+### Validation: success model (trained on 2023 to 2024, tested on 2025)
+
+The test set is 2,933 throw situations.
+
+| Model | What it is | Log loss | Brier | AUC |
+|---|---|---|---|---|
+| A32 | The fixed effects above | 0.50081 | 0.16172 | 0.624 |
+| B32 | A32 plus runner, catcher and pitcher effects | 0.50105 | 0.16210 | 0.627 |
+| B-arm32 | B32 with catcher arm strength (non-positive slope) and exchange (non-negative) in place of pop time | 0.50204 | 0.16212 | 0.619 |
+| C | LightGBM | 0.51167 | 0.16573 | 0.593 |
+| Constant | Training mean, 0.8023 | 0.51924 | 0.16813 | |
+
+Calibration of A32 by decile of predicted success (about 293 throws each):
+
+| Decile | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Mean predicted | 0.615 | 0.718 | 0.754 | 0.778 | 0.797 | 0.815 | 0.832 | 0.850 | 0.871 | 0.907 |
+| Observed | 0.643 | 0.666 | 0.761 | 0.765 | 0.844 | 0.802 | 0.788 | 0.829 | 0.867 | 0.901 |
+
+**Lagged-attribute check.** A season aggregate includes the attempts being predicted. To test for leakage, each attribute was replaced by the player's previous-season value (the previous season's league mean when missing). Each version was trained on 2024 only and tested on 2025:
+
+| A32 | 2025 log loss |
+|---|---|
+| Same-season attributes, trained on 2023 to 2024 | 0.50081 |
+| Same-season attributes, trained on 2024 | 0.50161 |
+| All attributes lagged, trained on 2024 | 0.50511 |
+
+Change in 2025 log loss when one attribute at a time is lagged: sprint speed +0.00008, pop time +0.00222, pitcher primary lead +0.00105, pitcher lead gained -0.00096, aggressiveness +0.00067.
+
+A previous-season value is also a noisier measure of current skill, so a small positive gap is expected without any leak. Only pop time is above the 0.002 threshold, and only just. It is kept, and listed under "Known limits". The attempts version of runner lead gained failed the same kind of check clearly (see "Rejected candidates").
+
+### Final model (A32, fitted on 2023 to 2025)
+
+Logit scale, per unit. Continuous terms are centered on the fit-table mean shown. Standard errors come from a game bootstrap (200 replicates).
+
+| Term | Estimate | SE | Center |
+|---|---|---|---|
+| Intercept | 1.534 | 0.077 | |
+| Pitch result: strike | -0.167 | 0.065 | |
+| Pitch result: strike three | 0.057 | 0.129 | |
+| 3-2 count | -1.054 | 0.145 | |
+| Pickoff throws: 1 | -0.075 | 0.062 | |
+| Pickoff throws: 2 or more | -0.056 | 0.133 | |
+| Pitchout | -0.578 | 0.367 | |
+| Pitcher left-handed | 0.914 | 0.129 | |
+| Batter bats left | -0.186 | 0.059 | |
+| Season 2024 | -0.132 | 0.073 | |
+| Season 2025 | -0.101 | 0.074 | |
+| Sprint speed (per ft/s, non-negative) | 0.055 | 0.027 | 28.226 |
+| Pop time (per s, non-negative) | 5.796 | 0.567 | 1.960 |
+| Pitcher primary lead (per ft, non-negative) | 0.176 | 0.076 | 10.366 |
+| Pitcher lead gained (per ft, non-negative) | 0.345 | 0.046 | 3.820 |
+| Runner aggressiveness (per unit share) | 3.492 | 0.793 | 0.082 |
+
+In-sample fit on all three seasons: log loss 0.48398, Brier 0.15488, AUC 0.640. Every constrained slope is inside its bound.
+
+Average change in predicted success over the 8,603 throw situations without a pitchout:
+- pop time 0.1 s slower: +7.6 points
+- lead gained 1 ft larger: +4.8 points
+- aggressiveness one standard deviation (0.045) higher: +2.3 points
+- sprint speed 1 ft/s faster: +0.8 points
+
+Findings:
+- **The 3-2 strike-three throw is different.** The 3-2 term is -1.054 (SE 0.145), and the strike-three term on its own is about zero (0.057, SE 0.129). Observed, 490 strike-three throws at 3-2 were safe 0.584 of the time, against 0.826 for 402 at 0-2, 1-2 and 2-2. The likely cause is selection. On a full count with 0 or 1 out, the runner goes on 25.9% of pitches (against 2.8% at 0-0), because ball four forces the runner and a foul or a ball in play erases the attempt. The runner goes because of the count, not because the pitch was a good one to run on, and a strike three turns into a strike-'em-out, throw-'em-out play.
+- **Player effects add nothing beyond the measured attributes.** B32 scored 0.50105 on 2025 against 0.50081 for A32. Its player effects were small: standard deviations of 0.105 (runners), 0.072 (catchers) and 0.031 (pitchers) on the logit scale. A32 is the production model.
+- **Pop time is in line with MLB's published figure.** The coefficient is 5.80 per second (SE 0.57), so a pop 0.1 s slower raises predicted success by 7.6 points on average over the fit table. MLB's published figure is about ten points per 0.1 s. That figure is a raw contrast across catchers, while ours is the partial effect with the runner, the pitcher and the pitch result held fixed, so ours is expected to be smaller.
+
+**Rejected candidates.**
+- **Runner lead gained on attempts: it leaks.** It is a season average over the runner's own attempts, so it contains the outcomes being predicted. With 2024 values in place of same-season ones, its 2025 log loss was 0.5050 against 0.5002 without it.
+- **Runner lead gained on opportunities:** indistinguishable from zero (0.030 per ft, SE 0.030 on all three seasons). It stays on the fit table but in no model.
+- **Catcher arm strength: too thin.** It rests on a median of 3 max-effort throws per catcher-season (at most 8), and B-arm32 lost to A32 by 0.00123.
+- **Missing-value indicators:** each covered 0 to 15 rows, mostly all safe, so their coefficients separated. Missing attributes use the fill values instead.
+
+**Fill values.**
+- A missing runner or catcher attribute takes the season mean over player-seasons.
+- A missing pitcher primary lead or lead gained takes the season mean over pitcher-seasons of the same hand. A pitcher-season's hand is the one used most often in the Retrosheet plays. Every pitcher-season had a hand.
+- A season outside 2023 to 2025 uses the 2025 season effect and fill values.
+
+| Season | Sprint speed | Pop time | Aggressiveness | Primary lead L / R | Lead gained L / R | Pitcher-seasons L / R |
+|---|---|---|---|---|---|---|
+| 2023 | 27.248 | 1.971 | 0.043 | 10.208 / 10.506 | 1.720 / 3.874 | 217 / 625 |
+| 2024 | 27.284 | 1.963 | 0.048 | 10.251 / 10.444 | 1.790 / 3.938 | 219 / 618 |
+| 2025 | 27.320 | 1.954 | 0.046 | 10.404 / 10.592 | 1.649 / 3.850 | 212 / 649 |
+
+### Engine
+
+- **Modules.**
+  - `engine/src/skipboard/steal_model.py`: `load_steal_model`, `StealSuccessModel.p_safe`, and the `RunnerProfile`, `CatcherProfile` and `PitcherProfile` inputs. The loader checks the terms, factor levels, constraint signs, and that pitcher fill values are given by hand. It raises `StealModelError` if any check fails.
+  - `engine/src/skipboard/steal_tables.py`: `load_steal_tables` reads the four tables in `models/steal/`.
+  - `engine/src/skipboard/steal_decision.py`: `steal_available` and `steal_decision`, which return the hold and run values, branches, effective throw success and break-even rates. Any object with a `p_safe` method can stand in for the success model.
+- **Model directory.** The success model is read from the directory passed to `load_steal_model`; otherwise from `SKIPBOARD_STEAL_MODEL_DIR`; otherwise from `data/derived/steal/`.
+- **Synthetic fixture.** `engine/tests/fixtures/steal_model/` holds round values with the structure of the exports, not estimated from any data. The unit tests run on it, so they need no Savant-derived file.
+- **Parity.** A parity test recomputes the research model's prediction from the coefficients file for every throw situation without a pitchout (8,603). It compares those with the engine's `p_safe`, and the largest difference must be below 1e-10. The test is skipped when the research exports are not present.
+- **Tests.** 71 tests cover the steal modules: 33 for the success model, 7 for the tables and 31 for the decision. The full engine suite has 184 tests, all passing.
+
+### Known limits
+
+- **Attributes are season aggregates.** A player has one value for every attempt in a season, and changes within the season are not seen. Pop time is the one attribute above the lagged-check threshold (+0.00222 against 0.002).
+- **The speed slope is weakened by selection.** Slow runners attempt only when the jump or the pitch favors them, so among attempts speed adds little: +0.8 points per ft/s. Aggressiveness (+2.3 points per standard deviation) acts as the skill proxy, and it carries part of the speed effect (its correlation with sprint speed is 0.57). It describes runners who choose to go often, not what happens when a runner is told to go more.
+- **Pitch-result shares are league-wide by count.** Every batter gets the same shares of fouls and balls in play on a going pitch. Only the in-play outcome mix depends on the batter.
+- **Hit-and-run plays are among the going pitches.** The marker does not separate a straight steal from a hit-and-run, so the pitch-result shares and the advancement table include both.
+- **Pickoff throws, not disengagements.** The model counts pitcher pickoff throws to first earlier in the plate appearance; both coefficients are small (-0.075 and -0.056). Step-offs and other disengagements count toward the disengagement limit but are not used.
+- **No pitch location or type.** Only the result of the pitch is known.
+- **FC advancement comes from the standard table.** With the runner going, fielder's choices are too rare (1, 5 and 1 plate appearances at 0, 1 and 2 outs from 2023 to 2025) to give their own advancement.
+- **First and third is not covered.** 1,711 attempts from 2023 to 2025 came with runners on first and third, and their in-play advancement cells are thin (7 of 30 with at least 30 plate appearances). The decision is offered with a runner on first only.
+- **The hand and lead-gained terms mean something only together.** The left-handed term (+0.914) offsets left-handers' smaller lead gained: 1.649 ft against 3.850 ft at the 2025 fill values, which is -0.76 on the logit scale at 0.345 per ft. Their primary lead is also slightly shorter: 10.404 ft against 10.592 ft at 0.176 per ft, about -0.03. At the 2025 fill values the net difference is +0.12 (0.802 against 0.782 for a league-average runner and catcher on a 0-0 ball). Neither term alone describes left-handers.
+- **Same-season look-ahead.** An attempt early in a season uses attributes measured over that whole season, including later games. At game time only the season to date, or the previous season, is available.
+- **No on-deck batter.** States that end the plate appearance get table values, as if the next batter were league average at 0-0.
+- **The 3-2 residual in 2025.** With the 3-2 term fitted on 2023 to 2024, 3-2 throws in 2025 were safe 0.500 of the time against 0.610 predicted (172 throws). The final fit includes 2025, which moves the term to -1.054.
