@@ -6,6 +6,7 @@ from conftest import scaled_profile
 
 from skipboard.steal_decision import steal_available, steal_decision
 from skipboard.steal_model import CatcherProfile, PitcherProfile, RunnerProfile, load_steal_model
+from skipboard.steal_tables import load_steal_tables
 from skipboard.value import run_expectancy, runs_after, wp, wp_after
 
 FIXTURE = Path(__file__).parent / "fixtures" / "steal_model"
@@ -131,3 +132,20 @@ def test_player_effects_and_pickoffs_reach_the_decision(model, state_factory):
 def test_pitcher_hand_must_match_the_state(model, state_factory):
     with pytest.raises(ValueError):
         decide(model, state_factory(base_code=1, pitcher_hand="R", **GAME), pitcher_hold=PitcherProfile(hand="L"))
+
+
+@pytest.mark.parametrize("outs", [0, 1, 2])
+def test_inplay_scoring_transitions_are_valued_as_runs_plus_run_expectancy(model, state_factory, outs):
+    # Regression: a runner-going in-play transition that scores is worth the runs scored plus the run expectancy of the resulting state.
+    tables = load_steal_tables()
+    state = state_factory(base_code=1, outs=outs, **GAME)
+    in_play = next(b for b in decide(model, state).branches if b.result == "in_play")
+    scoring = []
+    for o in in_play.outcomes:
+        transitions = tables.going_transitions(outs, o.label)
+        expected = sum(tr.p * (tr.runs + (0.0 if tr.outs_post >= 3 else run_expectancy(state_factory(base_code=tr.base_post, outs=tr.outs_post, **GAME))))
+                       for tr in transitions)
+        assert o.value_runs == pytest.approx(expected, abs=1e-12), o.label
+        if any(tr.runs > 0 for tr in transitions):
+            scoring.append(o.label)
+    assert {"2B", "HR"} <= set(scoring)

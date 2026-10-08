@@ -1,6 +1,6 @@
 # Models
 
-Four models score game situations: a run expectancy table (re24_v1), a win probability model (wp v1), a plate-appearance model (pa v1), and a steal-of-second model (steal v1). The first three are built from Retrosheet regular-season play-by-play data alone (see `docs/retrosheet_notice.md`). The first two are league-average models: they describe a typical team, not the teams on the field. The plate-appearance model adds the batter and pitcher. The steal model's success component also uses Baseball Savant season aggregates, which MLB permits only for non-commercial use: data files derived from Savant stay under `data/` and are not tracked, and the coefficient table documented below is a snapshot of the fitted model (see section 10, "Data sources and rights", in `docs/SCOPE.md`).
+Five models score game situations: a run expectancy table (re24_v1), a win probability model (wp v1), a plate-appearance model (pa v1), a steal-of-second model (steal v1), and a send-home-from-second model (send v1). The first three are built from Retrosheet regular-season play-by-play data alone (see `docs/retrosheet_notice.md`). The first two are league-average models: they describe a typical team, not the teams on the field. The plate-appearance model adds the batter and pitcher. The steal model's success component also uses Baseball Savant season aggregates, and the send model's success component uses Savant per-play hit data and leaderboards; MLB permits Savant data only for non-commercial use: data files derived from Savant stay under `data/` and are not tracked, and the coefficient tables documented below are snapshots of the fitted models (see section 10, "Data sources and rights", in `docs/SCOPE.md`).
 
 ## Valuation principle
 
@@ -12,6 +12,7 @@ Decision values are anchored. The level comes from the empirical tables, and the
 - `value_runs` is the same with `run_expectancy` and `continue_pa_runs`.
 - Both engine terms use the same platoon and base-out state settings. With league-average players at 0-0 the two engine terms are identical, so the value equals the table exactly.
 - Decision modules use `value_wp` and `value_runs` (`engine/src/skipboard/valuation.py`). `continue_pa_wp` and `continue_pa_runs` stay available as the raw model.
+- States that end the plate appearance: the steal decision values them at the tables, as if the next batter were league average at 0-0, while the send decision values them with `value_wp` and `value_runs` for the on-deck batter against the current pitcher.
 
 Why anchor: the raw plate-appearance model differs from the tables by up to 0.051 runs in a single state (see "Consistency checks and tolerances"). Those gaps are not equal across the states a decision compares, so they do not fully cancel. The raw model's steal break-even rate differed from the tables' by up to 3 percentage points, which is enough to flip a verdict on an attempt near break-even. Anchored, league-average players at 0-0 reproduce the tables exactly, so every option in a decision starts from the tables' level.
 
@@ -602,3 +603,301 @@ Findings:
 - **Same-season look-ahead.** An attempt early in a season uses attributes measured over that whole season, including later games. At game time only the season to date, or the previous season, is available.
 - **No on-deck batter.** States that end the plate appearance get table values, as if the next batter were league average at 0-0.
 - **The 3-2 residual in 2025.** With the 3-2 term fitted on 2023 to 2024, 3-2 throws in 2025 were safe 0.500 of the time against 0.610 predicted (172 throws). The final fit includes 2025, which moves the term to -1.054.
+
+## Send home from second (send v1)
+
+### Purpose
+
+The value of sending the runner from second home on a single to the outfield, compared with holding the runner at third. The fan makes the third-base coach's call: "send" or "hold". The model has three parts: a selection-corrected success model for the runner at home, a Retrosheet table for what the batter does on the play, and a decision module that values every resulting state with the plate-appearance model.
+
+The decision is offered with a runner on second only (first and third empty), fewer than 3 outs, and the single fielded first by the left, center or right fielder. It is defined as the call made at contact, on what can be known then: the batted ball, the runner, the fielder and the game situation. The fielding point is recorded where the ball was actually fielded; the model treats it as known at contact, which a coach approximates by reading the ball's flight.
+
+This is the first decision in which the on-deck batter enters the valuation. Every resulting state that continues the half-inning is valued with the on-deck batter against the current pitcher, for both options.
+
+### Inputs
+
+| Input | Values |
+|---|---|
+| Game state | Runner on second only, outs, inning, half and score, batter side, season |
+| Batted ball | Fielding point (x and y in feet, home plate at the origin), launch speed (mph) and angle (degrees), batted-ball type (ground ball, line drive, fly ball; popups count as fly balls), fielder position (7, 8 or 9) |
+| Runner | Sprint speed (ft/s) |
+| Fielder | Average arm strength at the position (mph) |
+| Positioning start | The fielder's starting distance from home plate (ft) and angle (degrees) |
+| On-deck batter and current pitcher | Plate-appearance profiles as in pa v1; league average if absent |
+| Close-call threshold | Default 0.7 |
+
+Any runner, fielder, positioning or launch value may be missing; missing values are filled (see "Fill values").
+
+Output: the hold and send values in win probability and runs, p_safe (the runner's chance of scoring if sent), p_send (the chance a coach sends), the break-even p_safe in each currency, the branch values, the verdict, its confidence and a close-call flag.
+
+### Data and seasons
+
+- Population: Retrosheet regular seasons 2023 to 2025, singles fielded first by an outfielder with a runner on second and third empty: 9,324 plays, of which 5,102 have a runner on second only (the primary population) and 4,222 have runners on first and second (tabulated separately, not modeled).
+- Per-play hit data: Baseball Savant's Statcast search export for every regular-season single, 2023 to 2025.
+- Leaderboards: Savant outfield arm strength and outfielder positioning, 2023 to 2025; runner sprint speed from the steal attribute table.
+- Fit table: 5,001 plays (3,583 sends, 1,418 holds). Evaluation trains on 2023 to 2024 (3,331 plays, 2,395 sends) and tests on 2025 (1,670 plays, 1,188 sends). The final fit uses all three seasons.
+- Scripts: `research/build_send_population.py` (population), `research/fetch_statcast_singles.py` (per-play pull), `research/fetch_savant.py --send-fit` (leaderboards), `research/build_send_fit_table.py` (join and fit table), `research/fit_send_success.py` (success model and diagnostics), `research/send_examples.py` (examples).
+- Tracked: `models/send/send_batter_advance_v1.csv` (Retrosheet only).
+- Not tracked, in `data/derived/send/`: `send_population_2023_2025.parquet`, `statcast_singles_runner_on_second_2023_2025.parquet`, `send_fit_table_2023_2025.parquet`, `send_fill_values_2023_2025.json`, `send_model_v1_coefficients.csv`, `send_model_v1_meta.json`, `send_model_v1_bootstrap.csv`.
+
+### Data: the Retrosheet population
+
+The runner's result comes from the advance codes in the play's event text (for example `2-H`, `2-3`, `2XH(82)`); an out cancelled by an error counts as safe. It agrees with Retrosheet's own column for the runner who scored from second on every play. A send is a runner who scored or was thrown out at home.
+
+| Primary population | Plays | Send rate | Safe rate among sends |
+|---|---|---|---|
+| 2023 | 1,760 | 0.716 | 0.963 |
+| 2024 | 1,638 | 0.717 | 0.977 |
+| 2025 | 1,704 | 0.710 | 0.964 |
+| All | 5,102 | 0.714 | 0.968 |
+| 0 outs | 1,242 | 0.468 | 0.978 |
+| 1 out | 1,744 | 0.612 | 0.974 |
+| 2 outs | 2,116 | 0.943 | 0.961 |
+| LF | 1,604 | 0.632 | 0.953 |
+| CF | 1,689 | 0.790 | 0.984 |
+| RF | 1,809 | 0.716 | 0.962 |
+
+Of the 5,102 primary plays, 3,526 runners scored, 1,432 were held at third and 118 were thrown out at home. Two results are neither a send nor a hold and are excluded: 23 runners stayed at second and 3 were thrown out at third. An error is charged on 2.0% of plays, and on the runner's own advance on 0.5%. With runners on first and second, the send rate is 0.741 and the safe rate among sends 0.976.
+
+Plausible coordinates: a fielding point under 150 ft from home plate, or a fielder start more than 200 ft from the fielding point, marks the hit coordinates as implausible. 73 plays are flagged (23, 27 and 23 by season); every one has a fielding point under 150 ft. They are excluded, with the one play that has no coordinates.
+
+### Data: the per-play Statcast pull
+
+- The Statcast search export was pulled for regular-season singles in 192 windows of three days, so no query approaches the export's row cap; the largest window returned 533 rows. A window returning a capped or round count would have been halved; none did. Every row's date lies inside its window.
+- The pull returned 78,048 singles, the same as Retrosheet's count for 2023 to 2025 (26,031, 25,902 and 26,115 by season). 11,471 have a runner on second and third empty.
+- **Game mapping.** Statcast has no doubleheader game number, and the repository had no team-code table. Each Retrosheet game is mapped to the Statcast game that shares the most singles by date, inning, batter and pitcher (IDs linked through the Chadwick register): 7,286 of 7,289 games, with no ties, a median of 10 shared singles, and the two games of every doubleheader (184 games) mapped to different Statcast games. The derived team codes are one to one within each season; the codes that differ are ANA to LAA, ARI to AZ, CHA to CWS, CHN to CHC, KCA to KC, LAN to LAD, NYA to NYY, NYN to NYM, SDN to SD, SFN to SF, SLN to STL, TBA to TB and WAS to WSH, and both OAK (2023 and 2024) and ATH (2025) map to ATH.
+- **Join.** Each play is matched within its game by inning, half, outs, batter and runner on second: 5,101 of 5,102 primary plays (0.9998); the one miss is in a game with no Statcast match. On every matched play, Statcast and Retrosheet agree on the score difference, the runs on the play, the fielding outfielder, the batter side and the pitcher.
+
+### Data: positioning, arm strength and the fielding point
+
+- **Positioning.** The fielder positioning page's CSV export gives player-level starts (average distance from home plate and angle) by season, position, batter side, runner state (none on, first only, other) and shade. It honors the filters only when one batter side is requested, so each side is pulled separately. The model uses runner state "other" (runners on, not first only, which includes a runner on second), shaded and unshaded starts combined, weighted by plate appearances to a team, season, position and batter-side start: 540 cells, covering every play. In 2025 the league start is about 291 ft (vs left-handed batters) and 300 ft (right-handed) in left field, 320 ft in center, and 299 ft and 290 ft in right field.
+- **Arm strength.** The arm strength page gives, per fielder and season, throws and the average arm by position, and the maximum over all throws only (no maximum by position). The lowest minimum it accepts is one throw. The average arm at the fielder's position is present on 85.9%, 87.5% and 85.7% of plays by season.
+- **The fielding point.** Statcast's hit coordinates (`hc_x`, `hc_y`), converted to feet with home plate at the origin, mark where the ball was fielded, not where it landed. Against `hit_distance_sc`:
+
+| Batted-ball type | Plays | Correlation | Median difference (fielding point minus hit distance) |
+|---|---|---|---|
+| Fly ball | 349 | 0.909 | 8.9 ft |
+| Line drive | 2,987 | 0.579 | 47.9 ft |
+| Ground ball | 1,752 | 0.101 | 175.8 ft |
+
+The fielding-point distance is therefore also the throw distance to the plate, and the fielder distance is from the fielder's start to where the ball was fielded.
+
+### Data: the on-deck batter
+
+The on-deck batter is the batter of the next plate appearance in the half-inning. It is missing when the play ended the half-inning: 392 of the 9,324 population plays, of which 122 are runners thrown out at home, 261 runners who scored (102 in the bottom of the 9th or later, 98 of them walk-offs; 103 earlier in the game with the batter then put out; 56 otherwise, 54 of them with the runner from first put out) and 8 holds. Missingness is tied to the outcome, so filling it with league average would leak the result into the send equation. Those plays use the lineup's due-up batter instead, which equals the actual next batter on 97.7% of the plays where both exist (220 fit-table plays use it).
+
+On-deck quality is the plate-appearance model's anchored run value of that batter against a league-average batter, at runners on first and third (the state if the runner holds), the play's outs, 0-0, against the pitcher's hand. Batters below 2,000 weighted plate appearances get league average (0): 949 of 5,101 plays (18.6%). Among the rest it averages 0.013 runs (standard deviation 0.034).
+
+### Method: why a sends-only model fails
+
+Coaches send when the runner will make it. Among the 3,583 sends in the fit table, 3,465 runners scored and 118 were thrown out at home, a safe rate of 96.7%. A probit for safe fitted on sends alone (S-only) learns P(safe | sent), which is high almost everywhere, and applied to held plays it says nearly every runner would have scored: its median P(safe) on held plays is 0.952. Against the run break-even it would send on 99.2% of plays with 1 out, where coaches send on 61.5%. The plays a coach holds differ in ways the covariates do not capture, and the model has to account for that.
+
+### Method: the selection model
+
+A bivariate probit with sample selection:
+- **Send equation:** send = 1 when Z gamma + u > 0, over every play.
+- **Safe equation:** safe = 1 when X beta + e > 0, observed only for sends.
+- (u, e) are standard bivariate normal with correlation rho. Holds contribute Phi(-Z gamma); safe sends Phi2(Z gamma, X beta; rho); out sends Phi2(Z gamma, -X beta; -rho).
+
+p_safe is the unconditional Phi(X beta): the chance the runner scores if sent, for any play. p_send is Phi(Z gamma).
+
+**Covariates (X, SEL-linear):** fielder position (LF reference), fielding-point distance, spray toward the line, fielder distance to the ball, launch speed, launch angle, batted-ball type (ground ball reference; popups as fly balls), arm strength at the position, runner sprint speed, batter side and outs (0 reference).
+
+Spray toward the line is the angle from straightaway toward the fielding outfielder's foul line: minus the spray angle for the left fielder (the spray angle is negative toward left field), the spray angle for the right fielder, and the absolute value for the center fielder (toward either gap).
+
+**Covariates (Z):** X plus the score difference (clipped to -4 to 4, a factor with 0 as reference), the inning group (1-3, 4-6, 7-8, 9 and later), on-deck quality, and a late-and-close indicator (inning 7 or later and the score within one run).
+
+**Exclusions.** Score, inning, on-deck quality and late-and-close enter only the send equation: they move the coach's call but not the race to the plate. Outs would be a natural exclusion, since coaches send far more with 2 outs, but it is an imperfect one: with 2 outs the runner goes on contact, which also changes the race. Outs therefore stays in both equations.
+
+**Constraints** in the safe equation, through an exponential parameterization as in the steal fit: fielding-point distance and fielder distance non-negative, arm strength non-positive, sprint speed non-negative. None bind: no slope changes sign without them, and the unconstrained fit's 2025 log losses are 0.39286 and 0.15184 against 0.39286 and 0.15187.
+
+**Fit.** L-BFGS on (gamma, beta, atanh rho) with analytic gradients, starting from the two separate probits, with a ridge of 0.0001 on every standardized slope. The bivariate normal CDF uses Drezner and Wesolowsky's integral with a 48-point Gauss-Legendre rule; against `scipy.stats.multivariate_normal.cdf` on a grid of 13 x 13 points in [-3, 3] and 13 values of rho from -0.99 to 0.99, the largest absolute error is 2.2e-16.
+
+**Specifications and selection rule.** SEL-race replaces the raw physical quantities with time-like ratios (throw distance over arm strength, fielder distance over launch speed, fielding-point distance over launch speed, one over sprint speed). SEL-linear is production unless SEL-race lowers the summed 2025 log loss of the send decision and of safe among sends by more than 0.002; it does not (it is 0.00558 worse). S-only is reported as the naive comparison only.
+
+Held-out scores cannot choose between the naive and the selection model. The 2025 test can score only P(safe | sent), which is exactly what S-only targets, so S-only scores better there (0.14907 against 0.15187). The decision needs P(safe | X) for plays that were not sent, which have no outcome. The selection model is preferred on the sanity check below, not on held-out scores.
+
+### Method: decision
+
+The batter who singled becomes a runner in every resulting state. Each runner result is split by the batter's advance from `models/send/send_batter_advance_v1.csv` (Retrosheet population, 2023 to 2025; advances beyond second counted as second):
+
+| Runner result | Outs | Batter to first | Batter to second | Batter out | Plays |
+|---|---|---|---|---|---|
+| Scored | 0 / 1 / 2 | 0.889 / 0.835 / 0.847 | 0.081 / 0.126 / 0.108 | 0.030 / 0.039 / 0.044 | 568 / 1,040 / 1,918 |
+| Out at home | 0 / 1 / 2 | 0.462 / 0.464 / 0.987 | 0.538 / 0.500 / 0.013 | 0.000 / 0.036 / 0.000 | 13 / 28 / 77 |
+| Held at third | 0 / 1 / 2 | 0.974 / 0.967 / 0.958 | 0.021 / 0.026 / 0.042 | 0.005 / 0.008 / 0.000 | 653 / 659 / 120 |
+
+| Option | Resulting states |
+|---|---|
+| Hold | Runner on third, same outs; batter on first (first and third), on second (second and third), or out (third only, one more out) |
+| Send, safe | One run scores; batter on first, on second, or out (one more out) |
+| Send, out | One more out; batter on first, on second, or out (two more outs) |
+
+- **Valuation.** States that continue the half-inning are valued with `value_wp` and `value_runs` at 0-0 with the on-deck batter against the current pitcher, plus any run scored on the play. A state reaching three outs ends the half-inning (`wp_after`, `runs_after`); a run that scores before the batter is put out for the third out counts. A safe send that wins the game in the bottom of the 9th or later is worth a win probability of 1.
+- **Values.** Hold = V(held). Send = p_safe V(safe) + (1 - p_safe) V(out).
+- **Break-even.** p* = (V_hold - V_out) / (V_safe - V_out), in each currency; none when V_safe is no greater than V_out. It can fall outside [0, 1] when one option dominates.
+- **Verdict and confidence.** The verdict is the option with the higher win probability. Its confidence is the share of the 200 bootstrap replicates of p_safe on the verdict's side of the win-probability p*. A confidence below the threshold (default 0.7) marks a close call.
+
+### Validation: models trained on 2023 to 2024, tested on 2025
+
+| Model | rho | Send log loss | Send Brier | Safe-among-sends log loss | Safe-among-sends Brier |
+|---|---|---|---|---|---|
+| S-only (send column: a separate send probit) | | 0.39186 | 0.12554 | 0.14907 | 0.03468 |
+| SEL-linear | 0.938 | 0.39286 | 0.12574 | 0.15187 | 0.03453 |
+| SEL-race | 0.874 | 0.40195 | 0.13064 | 0.14837 | 0.03447 |
+| SEL-linear, unconstrained | 0.938 | 0.39286 | 0.12574 | 0.15184 | 0.03453 |
+| Constant (send rate 0.7190, safe rate 0.9691) | | 0.60106 | 0.20538 | 0.15900 | 0.03570 |
+
+Calibration of SEL-linear by predicted quintile, 2025:
+
+| Quintile | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|
+| Send, mean predicted | 0.293 | 0.575 | 0.806 | 0.939 | 0.989 |
+| Send, observed | 0.260 | 0.545 | 0.817 | 0.955 | 0.979 |
+| Safe among sends, mean predicted | 0.905 | 0.963 | 0.983 | 0.994 | 0.999 |
+| Safe among sends, observed | 0.916 | 0.954 | 0.975 | 0.983 | 0.987 |
+
+### Validation: selection diagnostics (final fits on 2023 to 2025)
+
+**rho.** SEL-linear: 0.818, game-bootstrap 95% interval [0.49, 0.98] (200 replicates), profile-likelihood interval [0.43, 0.94] (rho fixed from 0.30 to 0.99 in steps of 0.01, cutoff 3.84). SEL-race: 0.687, bootstrap interval [0.30, 0.90]. Positive rho means the unobserved reasons a coach sends also make the runner safe.
+
+**P(safe | X) for sent and held plays:**
+
+| Model and plays | 10th percentile | Median | 90th percentile | Mean |
+|---|---|---|---|---|
+| SEL-linear, sent (3,583) | 0.714 | 0.933 | 0.996 | 0.889 |
+| SEL-linear, held (1,418) | 0.400 | 0.693 | 0.914 | 0.674 |
+| SEL-race, sent | 0.789 | 0.947 | 0.994 | 0.915 |
+| SEL-race, held | 0.559 | 0.800 | 0.951 | 0.775 |
+| S-only, sent | 0.916 | 0.981 | 0.999 | 0.967 |
+| S-only, held | 0.855 | 0.952 | 0.992 | 0.935 |
+
+**Sanity check.** The share of plays where P(safe | X) exceeds the run break-even, against the coaches' send rate. The break-even here is the simple one (the batter always on first): 0.977, 0.761 and 0.412 by outs.
+
+| Outs | Plays | Coaches' send rate | SEL-linear | SEL-race | S-only |
+|---|---|---|---|---|---|
+| 0 | 1,220 | 0.469 | 0.075 | 0.100 | 0.457 |
+| 1 | 1,700 | 0.615 | 0.639 | 0.785 | 0.992 |
+| 2 | 2,081 | 0.944 | 1.000 | 1.000 | 1.000 |
+
+**Out at home.** On the 118 plays where the runner was thrown out, SEL-linear's mean P(safe | X) is 0.800 (median 0.830), against 0.889 (median 0.933) for all sends; S-only gives 0.922 against 0.967.
+
+**rho sensitivity.** SEL-linear refitted with rho fixed at the ends of the bootstrap interval, all other parameters free:
+
+| | rho 0.49 | rho free (0.818) | rho 0.98 | Coaches |
+|---|---|---|---|---|
+| Log likelihood | -2447.348 | -2445.883 | -2451.476 | |
+| Held plays, median P(safe \| X) | 0.870 | 0.693 | 0.483 | |
+| Held plays, mean P(safe \| X) | 0.839 | 0.674 | 0.501 | |
+| Share above the run break-even, 0 outs | 0.192 | 0.075 | 0.026 | 0.469 |
+| Share above the run break-even, 1 out | 0.894 | 0.639 | 0.352 | 0.615 |
+| Share above the run break-even, 2 outs | 1.000 | 1.000 | 1.000 | 0.944 |
+
+**Run break-even with the batter's advance.** Valuing the three results with the batter's advance (scored: 1 run plus the run expectancy of the batter's state; out at home: the batter's state with one more out; held: runners on first and third, second and third, or third with one more out):
+
+| Outs | Scored (runs) | Out at home (runs) | Held (runs) | p* with the batter's advance | p* simple |
+|---|---|---|---|---|---|
+| 0 | 1.9034 | 0.6192 | 1.8686 | 0.973 | 0.977 |
+| 1 | 1.5362 | 0.2725 | 1.2207 | 0.750 | 0.761 |
+| 2 | 1.2332 | 0.0000 | 0.5107 | 0.414 | 0.412 |
+
+With it, SEL-linear sends on 0.082, 0.661 and 1.000 of plays by outs, and S-only still on 0.994 at 1 out.
+
+**Win-probability break-even, bottom of the 8th** (same batter's-advance shares):
+
+| State | Outs | p* (win probability) | p* (runs) | Difference |
+|---|---|---|---|---|
+| Tied | 0 / 1 / 2 | 0.820 / 0.616 / 0.313 | 0.973 / 0.750 / 0.414 | -0.153 / -0.134 / -0.102 |
+| Trailing by one | 0 / 1 / 2 | 0.885 / 0.677 / 0.377 | 0.973 / 0.750 / 0.414 | -0.088 / -0.074 / -0.037 |
+
+**Coefficient stability.** SEL-linear's safe equation fitted on 2023 to 2024 against 2023 to 2025 (per unit; the change is in units of the 2023 to 2025 bootstrap SE):
+
+| Term | 2023 to 2024 | 2023 to 2025 | Change / SE |
+|---|---|---|---|
+| Fielding-point distance | 0.02369 | 0.02749 | +1.20 |
+| Spray toward the line | -0.02085 | -0.01085 | +1.46 |
+| Fielder distance | 0.03275 | 0.03386 | +0.34 |
+| Launch speed | -0.01823 | -0.01741 | +0.20 |
+| Launch angle | -0.03010 | -0.02785 | +0.31 |
+| Arm strength | -0.02429 | -0.02664 | -0.27 |
+| Sprint speed | 0.17171 | 0.20975 | +1.33 |
+| CF | -0.32288 | -0.18561 | +0.61 |
+| RF | 0.34980 | 0.34051 | -0.11 |
+| Line drive | -0.04673 | -0.14102 | -0.90 |
+| Fly ball | 0.08436 | 0.13410 | +0.10 |
+| Batter bats left | 0.05537 | -0.02908 | -1.22 |
+| 1 out | 0.41363 | 0.28015 | -1.08 |
+| 2 outs | 1.33671 | 1.08297 | -0.86 |
+| rho | 0.93816 | 0.81755 | -0.89 |
+
+### Final model (SEL-linear, fitted on 2023 to 2025)
+
+Probit scale, per unit. Continuous terms are centered on the fit-table mean shown. Standard errors come from a game bootstrap (200 replicates).
+
+| Term | Send estimate | Send SE | Safe estimate | Safe SE | Center |
+|---|---|---|---|---|---|
+| Intercept | -0.27264 | 0.09269 | 0.76932 | 0.46098 | |
+| Fielding-point distance (ft; safe non-negative) | 0.01917 | 0.00157 | 0.02749 | 0.00317 | 257.924 |
+| Spray toward the line (degrees) | 0.00047 | 0.00363 | -0.01085 | 0.00684 | 21.459 |
+| Fielder distance (ft; safe non-negative) | 0.02580 | 0.00186 | 0.03386 | 0.00328 | 65.937 |
+| Launch speed (mph) | -0.01243 | 0.00288 | -0.01741 | 0.00411 | 92.159 |
+| Launch angle (degrees) | -0.03549 | 0.00527 | -0.02785 | 0.00723 | 11.017 |
+| Arm strength (mph; safe non-positive) | -0.02678 | 0.00623 | -0.02664 | 0.00870 | 88.050 |
+| Sprint speed (ft/s; safe non-negative) | 0.19332 | 0.01735 | 0.20975 | 0.02854 | 27.521 |
+| CF | 0.26888 | 0.10264 | -0.18561 | 0.22641 | |
+| RF | 0.43113 | 0.06055 | 0.34051 | 0.08378 | |
+| Line drive | -0.04066 | 0.07133 | -0.14102 | 0.10508 | |
+| Fly ball | 0.07416 | 0.16630 | 0.13410 | 0.50539 | |
+| Batter bats left | 0.09061 | 0.04649 | -0.02908 | 0.06919 | |
+| 1 out | 0.46242 | 0.04850 | 0.28015 | 0.12407 | |
+| 2 outs | 2.05161 | 0.06451 | 1.08297 | 0.29513 | |
+| On-deck quality (runs) | 0.54207 | 0.70742 | | | 0.010 |
+| Score -4 or less / -3 / -2 / -1 | -0.328 / -0.023 / -0.244 / -0.027 | 0.097 / 0.124 / 0.086 / 0.082 | | | |
+| Score +1 / +2 / +3 / +4 or more | -0.074 / 0.036 / -0.079 / -0.156 | 0.069 / 0.093 / 0.096 / 0.094 | | | |
+| Inning 4-6 / 7-8 / 9 and later | 0.032 / -0.184 / -0.194 | 0.061 / 0.077 / 0.092 | | | |
+| Late and close | 0.35434 | 0.09967 | | | |
+| rho | 0.81755 (SE 0.13622) | | | | |
+
+In-sample fit on all three seasons: send log loss 0.40009 (Brier 0.12937); safe among sends log loss 0.12421 (Brier 0.03024).
+
+**Fill values.** A missing arm strength takes the season mean for the position over fielder-seasons with throws there; a missing sprint speed the season mean over player-seasons; a missing start the league start for the season, position and batter side; missing launch speed or angle the season mean for the batted-ball type (popups as fly balls; 4 plays in the fit table); a missing on-deck quality 0. The send model has no season terms; a season outside 2023 to 2025 uses the 2025 fill values.
+
+### Engine
+
+- **Modules.**
+  - `engine/src/skipboard/send_model.py`: `load_send_model`, `SendModel.p_safe`, `p_send` and `p_safe_bootstrap`, `derived_covariates`, and the `BattedBall`, `FielderProfile`, `PositioningStart` and `SendContext` inputs (the runner reuses the steal model's `RunnerProfile`). The loader checks the terms of both equations, rho, the factor levels, the constraint signs, the centers, the fill values and the bootstrap header, and raises `SendModelError` if any check fails. `load_batter_advance` reads and validates the batter-advance table from `models/send/`.
+  - `engine/src/skipboard/send_decision.py`: `send_available` and `send_decision`, which return the option values, p_safe, p_send, both break-evens, the branches, the verdict, its confidence and the close-call flag. Any object with `p_safe`, `p_send` and `p_safe_bootstrap` methods can stand in for the model.
+- **Model directory.** The send model is read from the directory passed to `load_send_model`; otherwise from `SKIPBOARD_SEND_MODEL_DIR`; otherwise from `data/derived/send/`.
+- **Bootstrap confidence.** The 200 game-bootstrap coefficient sets are exported (`send_model_v1_bootstrap.csv`) and give p_safe per replicate; the confidence and the close-call threshold (default 0.7) are carried on every result.
+- **Synthetic fixture.** `engine/tests/fixtures/send_model/` holds round values with the structure of the exports, including five bootstrap replicates, not estimated from any data.
+- **Parity.** A parity test recomputes p_safe and p_send for every fit-table play (5,001) from the coefficients file and compares them with the engine; the largest differences are 6.7e-16 and 4.4e-16, and the test fails above 1e-10. It is skipped when the research exports are not present.
+- **Tests.** 20 tests cover the send model and 29 the send decision. The full engine suite has 236 tests, all passing.
+
+### Examples
+
+Six 2025 plays from the fit table with Toronto batting (`research/send_examples.py`). The rule: for each outs count, one send and one hold, preferring a late-and-close play and then the earliest date. All six turn out late and close.
+
+| Play | State | Coach's call, outcome | p_safe | p* (win probability) | Verdict (confidence) |
+|---|---|---|---|---|---|
+| 1 | Top 9th, 0 outs, Toronto up 3-2 | Send, scored | 0.332 | 0.910 | Hold (1.00) |
+| 2 | Bottom 8th, 0 outs, tied 3-3 | Hold, held | 0.813 | 0.825 | Hold (0.51, close call) |
+| 3 | Top 8th, 1 out, tied 3-3 | Send, scored | 0.892 | 0.708 | Send (1.00) |
+| 4 | Top 10th, 1 out, tied 6-6 | Hold, held | 0.907 | 0.695 | Send (1.00) |
+| 5 | Top 9th, 2 outs, Toronto up 4-3 | Send, scored | 0.859 | 0.293 | Send (1.00) |
+| 6 | Top 9th, 2 outs, Toronto up 2-1 | Hold, held | 0.728 | 0.296 | Send (1.00) |
+
+The model disagrees with the coach in two ways: on play 1 the coach sent on a soft liner the model calls a hold and the runner scored anyway, and on plays 4 and 6 the coach held where the model would send, which no outcome can confirm or refute. For the game this suggests curating plays whose verdict is not a close call and treating a model hold on a send that scored with care, since the screen would show a correct-by-outcome call scored as a mistake.
+
+### Known limits
+
+- **Selection and rho's width.** The correction rests on rho, and the data pin it down loosely (bootstrap interval 0.49 to 0.98, profile interval 0.43 to 0.94). Across the bootstrap interval the share of 1-out plays where sending gains runs spans 0.35 to 0.89. The send-only variables that identify rho are weak (on-deck quality 0.54, SE 0.71).
+- **The ball's path to the fielder is not seen.** The covariates know where the ball was fielded, not its path to the fielder, so a hard ball hit straight at a fielder is a weak spot. Play 6, a 111 mph liner fielded 33 ft from the center fielder's start, is one such play; the pattern has not been measured.
+- **Attributes are season aggregates.** Sprint speed and arm strength are season values, the same for every play in a season.
+- **Positioning is a team-season average.** The start is the team's average for the position, batter side and the "other runners on" state, not the fielder's start on the play.
+- **Arm averages are missing for 12 to 14% of plays** and take the season and position mean.
+- **The fielding point is where the ball was fielded, not where it landed.** For line drives and ground balls it sits a median 48 ft and 176 ft beyond the hit distance.
+- **Runners on first and second are not covered**, though the population has 4,222 such plays.
+- **Doubles are not covered.** The decision covers singles only.
+- **No error or throw-misplay branch.** Errors on the play (2.0%) are folded into the runner's result rather than valued as their own branch.
+- **Coefficients drift between fits.** Five safe-equation terms moved by more than one bootstrap SE from the 2023 to 2024 fit to the 2023 to 2025 fit, and rho moved from 0.94 to 0.82.
+- **The win-probability break-even sits below the run break-even late and close**, by up to 15 points in a tied bottom of the 8th. That is the decision working as intended, not a limit: late in a close game the value of one run relative to the cost of an out is higher than run expectancy implies.
