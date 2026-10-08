@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 from skipboard.steal_model import RunnerProfile
+from skipboard.tables import DEFAULT_MODELS_DIR
 
 # engine/src/skipboard/send_model.py -> project root is four levels up
 DEFAULT_SEND_MODEL_DIR = Path(__file__).resolve().parents[3] / "data" / "derived" / "send"
@@ -38,6 +39,7 @@ COEFFICIENTS_FILE = "send_model_v1_coefficients.csv"
 META_FILE = "send_model_v1_meta.json"
 BOOTSTRAP_FILE = "send_model_v1_bootstrap.csv"
 BATTER_ADVANCE_FILE = "send_batter_advance_v1.csv"
+SEND_TABLES_DIR = Path("send")  # Retrosheet-only send tables under models/
 SHARE_TOLERANCE = 1e-4  # saved shares are rounded to 6 decimals
 
 BBType = Literal["ground_ball", "line_drive", "fly_ball", "popup"]
@@ -361,8 +363,8 @@ def load_send_model(directory: str | Path | None = None) -> SendModel:
 
 
 def load_batter_advance(path: str | Path | None = None) -> dict[tuple[str, int], dict[str, float]]:
-    # The batter's advance by runner result and outs. Read from the research export until the table is promoted to models/send/.
-    file = Path(path).resolve() if path is not None else DEFAULT_SEND_MODEL_DIR / BATTER_ADVANCE_FILE
+    # The batter's advance by runner result and outs (Retrosheet only), from models/send/ unless a path is given.
+    file = Path(path).resolve() if path is not None else DEFAULT_MODELS_DIR / SEND_TABLES_DIR / BATTER_ADVANCE_FILE
     if not file.exists():
         raise SendModelError(f"batter advance table not found: {file}")
     df = pd.read_csv(file)

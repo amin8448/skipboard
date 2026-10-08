@@ -20,6 +20,7 @@ POP = ROOT / "data" / "derived" / "send" / "send_population_2023_2025.parquet"
 FILLS = ROOT / "data" / "derived" / "send" / "send_fill_values_2023_2025.json"
 RE = ROOT / "models" / "run_expectancy" / "re24_v1.csv"
 OUT = ROOT / "data" / "derived" / "send"
+MODELS_SEND = ROOT / "models" / "send"  # Retrosheet-only tables for the engine
 TRAIN, TEST, ALL = [2023, 2024], [2025], [2023, 2024, 2025]
 SEED = 2026
 N_BOOT = 200
@@ -527,8 +528,9 @@ ba = ba.reindex(["scored", "out at home", "held at third"], level=0)
 print("batter's advance by runner result and outs (shares sum to 1 per row):")
 print(ba.to_string(float_format="{:.3f}".format))
 print(f"check: shares sum to 1 in every row: {bool(np.allclose(ba[['first', 'second', 'out']].sum(axis=1), 1))}")
-path = OUT / "send_batter_advance_v1.csv"
-ba.reset_index().rename(columns={"runner_result": "runner_result", "outs": "outs"}).to_csv(path, index=False, float_format="%.6f")
+MODELS_SEND.mkdir(parents=True, exist_ok=True)
+path = MODELS_SEND / "send_batter_advance_v1.csv"
+ba.reset_index().assign(seasons=f"{ALL[0]}-{ALL[-1]}").to_csv(path, index=False, float_format="%.6f")
 written[path] = len(ba)
 sec = pop[(pop["base_code"] == 3) & pop["runner_result"].isin(["scored", "out at home", "held at third"])]
 tr = pd.crosstab([sec["runner_result"], sec["outs"]], sec["trailing_advance"])
@@ -568,7 +570,7 @@ sens = pd.DataFrame(sens).set_index("setting")
 print(sens.T.to_string(float_format="{:.3f}".format, na_rep=""))
 
 print("\n2. run break-even with the batter's advance (send_batter_advance_v1.csv and the run expectancy table)")
-adv = pd.read_csv(OUT / "send_batter_advance_v1.csv").set_index(["runner_result", "outs"])
+adv = pd.read_csv(MODELS_SEND / "send_batter_advance_v1.csv").set_index(["runner_result", "outs"])
 re2 = lambda b, o: 0.0 if o >= 3 else float(re.loc[(b, o)])  # noqa: E731
 p_adv, vals = {}, []
 for o in range(3):

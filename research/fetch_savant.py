@@ -3,6 +3,7 @@ import io
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -121,8 +122,10 @@ def check_season(df, year, columns, url):
 
 
 def add_to_manifest(path, url, rows):
+    # Files in subfolders (positioning/) are recorded with the folder.
     new = not MANIFEST.exists()
-    line = pd.DataFrame([{"file": path.name, "url": url, "download_date": datetime.date.today().isoformat(), "rows": rows}])
+    name = path.relative_to(SEASON_DIR).as_posix() if path.is_relative_to(SEASON_DIR) else path.name
+    line = pd.DataFrame([{"file": name, "url": url, "download_date": datetime.date.today().isoformat(), "rows": rows}])
     line.to_csv(MANIFEST, mode="a", header=new, index=False)
 
 
@@ -183,6 +186,96 @@ def fetch_steal_fit(years):
         catcher_poptime_page(year, SEASON_DIR / f"catcher_poptime_page_{year}.csv")
 
 
+def embedded(html, name, url):
+    # A JSON value assigned to a page variable, e.g. var data = [...] or const serverParams = {...}.
+    m = re.search(rf"(?:var|let|const)\s+{name}\s*=\s*", html)
+    if m is None:
+        raise SystemExit(f"no embedded {name} found at {url}")
+    start = m.end()
+    opener = html[start]
+    closer = {"[": "]", "{": "}"}[opener]
+    depth = 0
+    for end in range(start, len(html)):
+        if html[end] == opener:
+            depth += 1
+        elif html[end] == closer:
+            depth -= 1
+            if depth == 0:
+                break
+    return json.loads(html[start:end + 1])
+
+
+def arm_strength_page(year, path):
+    # The arm strength CSV export has no season column; the page embeds the same rows with a year field.
+    # minThrows=1 is the lowest minimum the page accepts (0 falls back to 50). One row per fielder-season,
+    # with throws and average arm strength by position and the overall maximum.
+    url = f"{SAVANT}/arm-strength?type=player&year={year}&minThrows=1&pos=arm_of&team="
+    resp = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    params = embedded(resp.text, "serverParams", url)
+    if int(params["minThrows"]) != 1:
+        raise SystemExit(f"minimum throws not accepted at {url}: {params['minThrows']}")
+    df = pd.DataFrame(embedded(resp.text, "data", url))
+    if df.empty:
+        raise SystemExit(f"no rows returned from {url}")
+    check_season(df, year, ["year"], url)
+    df.to_csv(path, index=False)
+    add_to_manifest(path, url, len(df))
+    return df
+
+
+POSITIONING = "https://baseballsavant.mlb.com/visuals/position_data"
+POS_LABEL = {7: "LF", 8: "CF", 9: "RF"}
+RUNNERS = {0: "none", 1: "first_only", 27: "other"}  # the page's runner filter: no runners on, 1B only, other
+SHADE = {0: "not_shaded", 1: "shaded"}
+
+
+def positioning(year, pos, side, runners, shade, path):
+    # Player-level start positions (distance from home and angle) from the fielder positioning visual's CSV
+    # export. The filters are honoured only with a single batter side; with both sides the export returns
+    # unlabelled splits, so each side is requested separately. attempts=1 is the lowest minimum.
+    url = (f"{POSITIONING}?type=player&teamId=&firstBase={runners}&shift={shade}&batSide={side}&season={year}"
+           f"&position={pos}&attempts=1&csv=true")
+    resp = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0"})
+    resp.raise_for_status()
+    df = pd.read_csv(io.BytesIO(resp.content)) if resp.content.strip() else pd.DataFrame()
+    if len(df):
+        check_season(df, year, ["season"], url)
+        if set(df["position"]) != {POS_LABEL[pos]}:
+            raise SystemExit(f"position check failed for {url}: {set(df['position'])}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(resp.content)
+    add_to_manifest(path, url, len(df))
+    return df
+
+
+def fetch_send_fit(years):
+    # Leaderboards for the send decision: outfield arm strength and outfielder positioning.
+    SEASON_DIR.mkdir(parents=True, exist_ok=True)
+    shown = set()
+    for year in years:
+        print(f"\n########## {year}")
+        arm = arm_strength_page(year, SEASON_DIR / f"arm_strength_of_page_{year}.csv")
+        if "arm" not in shown:
+            print(f"arm strength columns: {list(arm.columns)}")
+            shown.add("arm")
+        for pos, label in POS_LABEL.items():
+            n = int((pd.to_numeric(arm[f"total_throws_{label.lower()}"]) > 0).sum())
+            n_arm = int(pd.to_numeric(arm[f"arm_{label.lower()}"], errors="coerce").notna().sum())
+            print(f"  arm strength {label}: fielder-seasons with throws {n}, with an average arm {n_arm}")
+        for pos, label in POS_LABEL.items():
+            for side in ("R", "L"):
+                for runners, rname in RUNNERS.items():
+                    for shade, sname in SHADE.items():
+                        path = SEASON_DIR / "positioning" / f"positioning_{year}_{label}_{side}_{rname}_{sname}.csv"
+                        df = positioning(year, pos, side, runners, shade, path)
+                        if "pos" not in shown and len(df):
+                            print(f"positioning columns: {list(df.columns)}")
+                            shown.add("pos")
+                        print(f"  positioning {label} vs {side}, runners {rname}, {sname}: {len(df)} fielder rows")
+                        time.sleep(0.5)
+
+
 def fetch_seasons(years):
     SEASON_DIR.mkdir(parents=True, exist_ok=True)
     for year in years:
@@ -196,8 +289,11 @@ def fetch_seasons(years):
 if __name__ == "__main__":
     # No arguments: the 2026 download. With seasons, e.g. 2023 2024 2025: steal-related leaderboards per season.
     # With --steal-fit and seasons: the extra leaderboards for the steal success model.
+    # With --send-fit and seasons: outfield arm strength and outfielder positioning for the send decision.
     if len(sys.argv) > 1 and sys.argv[1] == "--steal-fit":
         fetch_steal_fit([int(y) for y in sys.argv[2:]])
+    elif len(sys.argv) > 1 and sys.argv[1] == "--send-fit":
+        fetch_send_fit([int(y) for y in sys.argv[2:]])
     elif len(sys.argv) > 1:
         fetch_seasons([int(y) for y in sys.argv[1:]])
     else:
