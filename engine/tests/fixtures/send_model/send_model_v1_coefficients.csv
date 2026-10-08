@@ -1,0 +1,45 @@
+equation,term,estimate,se,constraint,center
+send,intercept,0.2,0.1,none,
+send,fielding_distance,0.02,0.01,none,260.0
+send,spray_toward_line,0.01,0.01,none,20.0
+send,fielder_distance,0.03,0.01,none,65.0
+send,launch_speed,-0.01,0.01,none,92.0
+send,launch_angle,-0.03,0.01,none,11.0
+send,arm_avg,-0.03,0.01,none,88.0
+send,runner_sprint_speed,0.2,0.05,none,27.5
+send,on_deck_quality,0.5,0.5,none,0.01
+send,pos=CF,0.3,0.1,none,
+send,pos=RF,0.4,0.1,none,
+send,bb=line_drive,-0.05,0.1,none,
+send,bb=fly_ball,0.1,0.1,none,
+send,bat_side=L,0.1,0.05,none,
+send,outs=1,0.5,0.05,none,
+send,outs=2,2.0,0.1,none,
+send,score=-4,-0.3,0.1,none,
+send,score=-3,-0.1,0.1,none,
+send,score=-2,-0.2,0.1,none,
+send,score=-1,-0.05,0.1,none,
+send,score=+1,-0.05,0.1,none,
+send,score=+2,0.05,0.1,none,
+send,score=+3,-0.1,0.1,none,
+send,score=+4,-0.15,0.1,none,
+send,inning=4-6,0.05,0.05,none,
+send,inning=7-8,-0.2,0.1,none,
+send,inning=9+,-0.2,0.1,none,
+send,late_close,0.35,0.1,none,
+safe,intercept,0.8,0.4,none,
+safe,fielding_distance,0.03,0.005,>= 0,260.0
+safe,spray_toward_line,-0.01,0.01,none,20.0
+safe,fielder_distance,0.03,0.005,>= 0,65.0
+safe,launch_speed,-0.02,0.005,none,92.0
+safe,launch_angle,-0.03,0.01,none,11.0
+safe,arm_avg,-0.03,0.01,<= 0,88.0
+safe,runner_sprint_speed,0.2,0.03,>= 0,27.5
+safe,pos=CF,-0.2,0.2,none,
+safe,pos=RF,0.3,0.1,none,
+safe,bb=line_drive,-0.1,0.1,none,
+safe,bb=fly_ball,0.1,0.5,none,
+safe,bat_side=L,-0.05,0.05,none,
+safe,outs=1,0.3,0.1,none,
+safe,outs=2,1.0,0.3,none,
+rho,rho,0.8,0.1,none,
